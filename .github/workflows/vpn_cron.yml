@@ -1,0 +1,32 @@
+name: Auto Trial VPN (Every 3 Days)
+
+on:
+  schedule:
+    # Запускается каждые 3 дня в 08:00 UTC (11:00 по Москве)
+    - cron: '0 8 */3 * *'
+  workflow_dispatch:
+
+jobs:
+  send-vpn-subs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Скачиваем код
+        uses: actions/checkout@v4
+
+      - name: Устанавливаем Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Устанавливаем библиотеки и браузер
+        run: |
+          pip install requests playwright
+          playwright install --with-deps chromium
+
+      - name: Генерируем 3 подписки в инкогнито и отправляем в Telegram
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          CHAT_ID_1: ${{ secrets.CHAT_ID_1 }}
+          CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
+          CHAT_ID_3: ${{ secrets.CHAT_ID_3 }}
+        run: python auto_trial.py
