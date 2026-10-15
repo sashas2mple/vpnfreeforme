@@ -37,13 +37,17 @@ def wait_for_email_link(token, timeout=45):
             msg = requests.get(f"{MAIL_API}/messages/{msg_id}", headers=headers, timeout=15).json()
             text = msg.get("text", "") or str(msg.get("html", ""))
             links = re.findall(r'(https?://[^\s"\'<>]+|happ://[^\s"\'<>]+)', text)
-            if links:
-                return links
+            # Отфильтровываем служебные ссылки картинок/стилей
+            valid_links = [
+                l for l in links
+                if not any(ext in l.lower() for ext in [".png", ".jpg", ".jpeg", ".svg", ".css", ".js", "w3.org"])
+            ]
+            if valid_links:
+                return valid_links
         time.sleep(3)
     return []
 
 def send_photo_to_telegram(chat_id, photo_path, caption):
-    """Отправляет скриншот браузера в Telegram для наглядной проверки"""
     if not TG_BOT_TOKEN or not chat_id or not os.path.exists(photo_path):
         return
     with open(photo_path, "rb") as photo:
@@ -85,7 +89,7 @@ def get_trial_in_incognito(browser):
     print(f"[+] Сгенерирована почта: {email}")
 
     context = browser.new_context(
-        viewport={"width": 1280, "height": 800},
+        viewport={"width": 1280, "height": 900},
         user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     )
     page = context.new_page()
@@ -95,50 +99,92 @@ def get_trial_in_incognito(browser):
     screenshot_path = "debug_screen.png"
 
     try:
-        # Используем domcontentloaded, чтобы не зависать на 30 секунд
         page.goto(TRIAL_URL, wait_until="domcontentloaded", timeout=20000)
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(3000)
 
-        # Ищем поле ввода почты (любое видимое текстовое/email поле)
-        email_input = page.locator('input[type="email"], input[name*="mail" i], input[placeholder*="mail" i], input[placeholder*="почт" i], input[type="text"]').first
+        # Запоминаем все ссылки на странице ДО открытия формы и ввода почты
+        before_links = set(page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)"))
+
+        # 1. Нажимаем кнопку "Получить на E-mail", чтобы открылось окно ввода почты
+        email_trigger = page.locator('text="Получить на E-mail", text="Получить VPN"').first
+        if email_trigger.is_visible(timeout=5000):
+            email_trigger.click()
+            page.wait_for_timeout(2000)
+
+        # 2. Ищем видимое поле для ввода почты
+        email_input = page.locator(
+            'input[type="email"]:visible, input[name*="mail" i]:visible, '
+            'input[placeholder*="mail" i]:visible, input[placeholder*="почт" i]:visible, '
+            'input[type="text"]:visible'
+        ).first
         email_input.wait_for(state="visible", timeout=10000)
         email_input.fill(email)
+        page.wait_for_timeout(500)
 
-        # Ищем кнопку отправки
-        submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Получить"), button:has-text("Trial"), button:has-text("Отправить"), button:has-text("Попробовать"), form button').first
-        submit_btn.click()
+        # Если в форме есть галочка согласия (checkbox) — отмечаем её
+        checkboxes = page.locator('input[type="checkbox"]:visible')
+        for i in range(checkboxes.count()):
+            cb = checkboxes.nth(i)
+            if not cb.is_checked():
+                cb.check(force=True)
+
+        # 3. Нажимаем кнопку отправки внутри формы (или Enter в поле почты)
+        submit_btn = page.locator(
+            'form button[type="submit"]:visible, form input[type="submit"]:visible, '
+            'button[type="submit"]:visible, input[type="submit"]:visible, '
+            'form button:visible'
+        ).first
+
+        if submit_btn.is_visible(timeout=3000):
+            submit_btn.click()
+        else:
+            email_input.press("Enter")
+
+        # Ждём появления вышедшей ссылки или ответа сервера
         page.wait_for_timeout(6000)
+
+        # 4. Проверяем, появилась ли новая ссылка прямо на странице
+        after_links = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+        new_links = [
+            l for l in after_links
+            if l not in before_links
+            and not l.startswith("javascript:")
+            and not l.startswith("mailto:")
+            and not l.endswith("#")
+        ]
 
         if page.locator('text="Добавить подписку"').count() > 0 or page.url != TRIAL_URL:
             sub_page_url, happ_link = extract_from_sub_page(page)
-        else:
-            links_on_page = re.findall(r'(https?://[^\s"\'<>]+/sub[^\s"\'<>]*|happ://[^\s"\'<>]+)', page.content())
-            if links_on_page:
-                target = links_on_page[0]
-                if target.startswith("http"):
-                    page.goto(target, wait_until="domcontentloaded", timeout=20000)
-                    page.wait_for_timeout(3000)
-                    sub_page_url, happ_link = extract_from_sub_page(page)
-                else:
-                    happ_link = target
+        elif new_links:
+            target = new_links[0]
+            print(f"[+] Найдена новая ссылка на странице: {target}")
+            if target.startswith("happ://"):
+                happ_link = target
             else:
-                print("[*] Проверяем письмо на почте...")
-                email_links = wait_for_email_link(token)
-                for link in email_links:
-                    if link.startswith("happ://"):
-                        happ_link = link
-                        break
-                    page.goto(link, wait_until="domcontentloaded", timeout=20000)
-                    page.wait_for_timeout(3000)
-                    sub_page_url, happ_link = extract_from_sub_page(page)
+                page.goto(target, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(3000)
+                sub_page_url, happ_link = extract_from_sub_page(page)
+        else:
+            # 5. Если ссылка не появилась на экране — проверяем входящие письма на почте
+            print("[*] Проверяем письмо на почте...")
+            email_links = wait_for_email_link(token)
+            for link in email_links:
+                print(f"[+] Ссылка из письма: {link}")
+                if link.startswith("happ://"):
+                    happ_link = link
+                    break
+                page.goto(link, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(3000)
+                sub_page_url, happ_link = extract_from_sub_page(page)
+                if sub_page_url or happ_link:
                     break
 
-        page.screenshot(path=screenshot_path, full_page=True)
+        page.screenshot(path=screenshot_path, full_page=False)
     except Exception as e:
         error_text = str(e)
         print(f"[-] Ошибка при оформлении триала: {e}")
         try:
-            page.screenshot(path=screenshot_path, full_page=True)
+            page.screenshot(path=screenshot_path, full_page=False)
         except Exception:
             pass
     finally:
@@ -175,12 +221,11 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
             ]
         }
 
-    resp = requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload, timeout=15)
-    print(f"[*] Ответ Telegram API: {resp.status_code} {resp.text}")
+    requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload, timeout=15)
 
 def main():
     if not TG_BOT_TOKEN:
-        print("[-] КРИТИЧЕСКАЯ ОШИБКА: Секрет TG_BOT_TOKEN не задан в Settings -> Secrets!")
+        print("[-] КРИТИЧЕСКАЯ ОШИБКА: Секрет TG_BOT_TOKEN не задан!")
         return
 
     with sync_playwright() as p:
@@ -189,10 +234,9 @@ def main():
         for user in USERS:
             chat_id = user["chat_id"]
             if not chat_id:
-                print(f"[-] Пропуск {user['name']}: секрет CHAT_ID не задан")
                 continue
 
-            print(f"\n[*] Генерируем подписку для: {user['name']} (ID: {chat_id})")
+            print(f"\n[*] Генерируем подписку для: {user['name']}")
             sub_page_url, happ_link, screen, err, email = get_trial_in_incognito(browser)
 
             if sub_page_url or happ_link:
@@ -200,9 +244,9 @@ def main():
                 send_to_telegram(chat_id, sub_page_url, happ_link)
             else:
                 caption = (
-                    f"⚠️ Скрипт запустился (почта {email}), но не смог забрать ссылку автоматически.\n"
-                    f"Вот что сейчас на экране браузера.\n"
-                    f"Детали: {err or 'Ссылка не найдена на странице или в письме'}"
+                    f"⚠️ Скрипт нажал кнопку (почта {email}), но не увидел ссылку.\n"
+                    f"Вот что сейчас на экране.\n"
+                    f"Детали: {err or 'Окно после нажатия на скриншоте'}"
                 )
                 send_photo_to_telegram(chat_id, screen, caption)
 
