@@ -3,12 +3,14 @@ import re
 import time
 import random
 import string
+from urllib.parse import quote
 import requests
 from playwright.sync_api import sync_playwright
 
 MAIL_API = "https://api.mail.tm"
 TRIAL_URL = "https://power-vps.pro/free-trial/"
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
 
 USERS = [
     {"name": "Пользователь 1 (Ты)", "chat_id": os.environ.get("CHAT_ID_1")},
@@ -96,7 +98,7 @@ def extract_from_sub_page(page):
 
 def get_trial_in_incognito(browser):
     email, token = create_temp_email()
-    print(f"[+] Сгенерирована почта: {email}")
+    print("[+] Временная почта сгенерирована")
 
     context = browser.new_context(
         viewport={"width": 1280, "height": 900},
@@ -112,7 +114,6 @@ def get_trial_in_incognito(browser):
         page.goto(TRIAL_URL, wait_until="domcontentloaded", timeout=20000)
         page.wait_for_timeout(3000)
 
-        # Запоминаем исходные ссылки на странице
         before_links = set(page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)"))
 
         # 1. Нажимаем кнопку "Получить на E-mail"
@@ -144,7 +145,7 @@ def get_trial_in_incognito(browser):
         else:
             page.locator('button[type="submit"]:visible, input[type="submit"]:visible').first.click()
 
-        # 4. Безопасно ждём завершения перезагрузки/навигации и проверяем ссылки
+        # 4. Ждём завершения навигации и проверяем ссылки
         new_links = []
         for _ in range(12):
             page.wait_for_timeout(1000)
@@ -165,13 +166,10 @@ def get_trial_in_incognito(browser):
                 if new_links:
                     break
             except Exception:
-                # Если страница в процессе перезагрузки — просто ждём следующую секунду
                 continue
 
-        # Если на странице появилась новая ссылка — переходим по ней
         if not (sub_page_url or happ_link) and new_links:
             target = new_links[0]
-            print(f"[+] Найдена новая ссылка на странице: {target}")
             if target.startswith("happ://"):
                 happ_link = target
             else:
@@ -186,7 +184,6 @@ def get_trial_in_incognito(browser):
             print("[*] Проверяем письмо на почте...")
             email_links = wait_for_email_link(token)
             for link in email_links:
-                print(f"[+] Ссылка из письма: {link}")
                 if link.startswith("happ://"):
                     happ_link = link
                     break
@@ -216,17 +213,24 @@ def get_trial_in_incognito(browser):
 
     return sub_page_url, happ_link, screenshot_path, error_text, email
 
+def build_redirect_url(target_url):
+    if not target_url or "/" not in GITHUB_REPOSITORY:
+        return None
+    owner, repo = GITHUB_REPOSITORY.split("/", 1)
+    return f"https://{owner}.github.io/{repo}/?url={quote(target_url, safe='')}"
+
 def send_to_telegram(chat_id, sub_page_url, happ_link):
+    target_for_happ = happ_link if happ_link else sub_page_url
+    fast_redirect_url = build_redirect_url(target_for_happ)
+
     text_lines = ["🔥 <b>Твоя новая подписка VPN на 3 дня готова!</b>\n"]
     if sub_page_url and sub_page_url.startswith("http"):
-        text_lines.append(f"🌐 <b>Страница подписки:</b>\n<code>{sub_page_url}</code>\n")
-    if happ_link:
-        text_lines.append(f"📲 <b>Прямая ссылка для Happ:</b>\n<code>{happ_link}</code>\n")
+        text_lines.append(f"🌐 <b>Ссылка подписки (нажми, чтобы скопировать):</b>\n<code>{sub_page_url}</code>\n")
 
     text_lines.append(
-        "<b>Как добавить (на iPhone и Mac):</b>\n"
-        "1. Нажми кнопку <b>«➕ Открыть страницу подписки»</b> ниже и нажми <b>«+ Добавить подписку»</b>.\n"
-        "2. Либо скопируй ссылку выше, открой <b>Happ</b> -> нажми <b>«+»</b> -> <b>«Вставить из буфера»</b>."
+        "<b>Как добавить в 1 клик:</b>\n"
+        "1. Нажми кнопку <b>«🚀 Сразу добавить в Happ»</b> ниже — откроется приложение Happ с новой подпиской.\n"
+        "2. Старую истёкшую подписку в Happ просто смахни влево."
     )
 
     payload = {
@@ -236,12 +240,14 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
         "disable_web_page_preview": True,
     }
 
+    buttons = []
+    if fast_redirect_url:
+        buttons.append([{"text": "🚀 Сразу добавить в Happ", "url": fast_redirect_url}])
     if sub_page_url and sub_page_url.startswith("http"):
-        payload["reply_markup"] = {
-            "inline_keyboard": [
-                [{"text": "➕ Открыть страницу подписки", "url": sub_page_url}]
-            ]
-        }
+        buttons.append([{"text": "🌐 Открыть страницу подписки", "url": sub_page_url}])
+
+    if buttons:
+        payload["reply_markup"] = {"inline_keyboard": buttons}
 
     requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload, timeout=15)
 
@@ -261,12 +267,11 @@ def main():
             sub_page_url, happ_link, screen, err, email = get_trial_in_incognito(browser)
 
             if sub_page_url or happ_link:
-                print(f"[+] Успешно! Страница: {sub_page_url} | Happ: {happ_link}")
+                print(f"[+] Подписка для {user['name']} успешно получена и отправлена в Telegram!")
                 send_to_telegram(chat_id, sub_page_url, happ_link)
             else:
                 caption = (
-                    f"⚠️ Скрипт отправил форму (почта {email}), но не увидел ссылку.\n"
-                    f"Адрес страницы: { TRIA_URL if not sub_page_url else sub_page_url }\n"
+                    f"⚠️ Скрипт отправил форму, но не увидел ссылку.\n"
                     f"Детали: {err or 'См. скриншот экрана после отправки формы'}"
                 )
                 send_photo_to_telegram(chat_id, screen, caption)
