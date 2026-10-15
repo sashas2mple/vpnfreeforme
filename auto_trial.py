@@ -11,7 +11,7 @@ TRIAL_URL = "https://power-vps.pro/free-trial/"
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 
 USERS = [
-    {"name": "Пользователь 1 (Ты — iPhone + Mac)", "chat_id": os.environ.get("CHAT_ID_1")},
+    {"name": "Пользователь 1 (Ты)", "chat_id": os.environ.get("CHAT_ID_1")},
     {"name": "Пользователь 2 (Друг 1)", "chat_id": os.environ.get("CHAT_ID_2")},
     {"name": "Пользователь 3 (Друг 2)", "chat_id": os.environ.get("CHAT_ID_3")},
 ]
@@ -27,7 +27,7 @@ def create_temp_email():
     token = requests.post(f"{MAIL_API}/token", json={"address": email, "password": password}, timeout=15).json()["token"]
     return email, token
 
-def wait_for_email_link(token, timeout=60):
+def wait_for_email_link(token, timeout=45):
     headers = {"Authorization": f"Bearer {token}"}
     start = time.time()
     while time.time() - start < timeout:
@@ -41,6 +41,18 @@ def wait_for_email_link(token, timeout=60):
                 return links
         time.sleep(3)
     return []
+
+def send_photo_to_telegram(chat_id, photo_path, caption):
+    """Отправляет скриншот браузера в Telegram для наглядной проверки"""
+    if not TG_BOT_TOKEN or not chat_id or not os.path.exists(photo_path):
+        return
+    with open(photo_path, "rb") as photo:
+        requests.post(
+            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
+            data={"chat_id": chat_id, "caption": caption[:1000]},
+            files={"photo": photo},
+            timeout=20
+        )
 
 def extract_from_sub_page(page):
     page_url = page.url
@@ -73,21 +85,29 @@ def get_trial_in_incognito(browser):
     print(f"[+] Сгенерирована почта: {email}")
 
     context = browser.new_context(
+        viewport={"width": 1280, "height": 800},
         user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     )
     page = context.new_page()
     sub_page_url = None
     happ_link = None
+    error_text = None
+    screenshot_path = "debug_screen.png"
 
     try:
-        page.goto(TRIAL_URL, wait_until="networkidle", timeout=30000)
+        # Используем domcontentloaded, чтобы не зависать на 30 секунд
+        page.goto(TRIAL_URL, wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_timeout(4000)
 
-        email_input = page.locator('input[type="email"], input[name*="mail" i], input[placeholder*="mail" i]').first
+        # Ищем поле ввода почты (любое видимое текстовое/email поле)
+        email_input = page.locator('input[type="email"], input[name*="mail" i], input[placeholder*="mail" i], input[placeholder*="почт" i], input[type="text"]').first
+        email_input.wait_for(state="visible", timeout=10000)
         email_input.fill(email)
 
-        submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Получить"), button:has-text("Trial"), button:has-text("Отправить")').first
+        # Ищем кнопку отправки
+        submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Получить"), button:has-text("Trial"), button:has-text("Отправить"), button:has-text("Попробовать"), form button').first
         submit_btn.click()
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(6000)
 
         if page.locator('text="Добавить подписку"').count() > 0 or page.url != TRIAL_URL:
             sub_page_url, happ_link = extract_from_sub_page(page)
@@ -96,7 +116,8 @@ def get_trial_in_incognito(browser):
             if links_on_page:
                 target = links_on_page[0]
                 if target.startswith("http"):
-                    page.goto(target, wait_until="networkidle", timeout=30000)
+                    page.goto(target, wait_until="domcontentloaded", timeout=20000)
+                    page.wait_for_timeout(3000)
                     sub_page_url, happ_link = extract_from_sub_page(page)
                 else:
                     happ_link = target
@@ -107,23 +128,25 @@ def get_trial_in_incognito(browser):
                     if link.startswith("happ://"):
                         happ_link = link
                         break
-                    page.goto(link, wait_until="networkidle", timeout=30000)
+                    page.goto(link, wait_until="domcontentloaded", timeout=20000)
                     page.wait_for_timeout(3000)
-                    if page.locator('text="Добавить подписку"').count() > 0 or "/sub" in page.url:
-                        sub_page_url, happ_link = extract_from_sub_page(page)
-                        break
+                    sub_page_url, happ_link = extract_from_sub_page(page)
+                    break
 
+        page.screenshot(path=screenshot_path, full_page=True)
     except Exception as e:
+        error_text = str(e)
         print(f"[-] Ошибка при оформлении триала: {e}")
+        try:
+            page.screenshot(path=screenshot_path, full_page=True)
+        except Exception:
+            pass
     finally:
         context.close()
 
-    return sub_page_url, happ_link
+    return sub_page_url, happ_link, screenshot_path, error_text, email
 
 def send_to_telegram(chat_id, sub_page_url, happ_link):
-    if not TG_BOT_TOKEN or not chat_id:
-        return
-
     text_lines = ["🔄 <b>Твоя новая подписка VPN на 3 дня готова!</b>\n"]
 
     if sub_page_url and sub_page_url.startswith("http"):
@@ -135,8 +158,7 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
     text_lines.append(
         "💡 <b>Как добавить (на iPhone и Mac):</b>\n"
         "1. Нажми кнопку <b>«➕ Открыть страницу подписки»</b> ниже и нажми <b>«+ Добавить подписку»</b>.\n"
-        "2. Либо скопируй ссылку выше, открой <b>Happ</b> → нажми <b>«+»</b> → <b>«Вставить из буфера»</b>.\n"
-        "3. Старую истёкшую подписку в Happ просто смахни влево, чтобы удалить."
+        "2. Либо скопируй ссылку выше, открой <b>Happ</b> → нажми <b>«+»</b> → <b>«Вставить из буфера»</b>."
     )
 
     payload = {
@@ -153,26 +175,36 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
             ]
         }
 
-    requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload, timeout=15)
+    resp = requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload, timeout=15)
+    print(f"[*] Ответ Telegram API: {resp.status_code} {resp.text}")
 
 def main():
+    if not TG_BOT_TOKEN:
+        print("[-] КРИТИЧЕСКАЯ ОШИБКА: Секрет TG_BOT_TOKEN не задан в Settings -> Secrets!")
+        return
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
 
         for user in USERS:
             chat_id = user["chat_id"]
             if not chat_id:
-                print(f"[-] Пропуск {user['name']}: не указан chat_id")
+                print(f"[-] Пропуск {user['name']}: секрет CHAT_ID не задан")
                 continue
 
-            print(f"\n[*] Генерируем подписку для: {user['name']}")
-            sub_page_url, happ_link = get_trial_in_incognito(browser)
+            print(f"\n[*] Генерируем подписку для: {user['name']} (ID: {chat_id})")
+            sub_page_url, happ_link, screen, err, email = get_trial_in_incognito(browser)
 
             if sub_page_url or happ_link:
                 print(f"[+] Успешно! Страница: {sub_page_url} | Happ: {happ_link}")
                 send_to_telegram(chat_id, sub_page_url, happ_link)
             else:
-                print(f"[-] Не удалось получить ссылку для {user['name']}")
+                caption = (
+                    f"⚠️ Скрипт запустился (почта {email}), но не смог забрать ссылку автоматически.\n"
+                    f"Вот что сейчас на экране браузера.\n"
+                    f"Детали: {err or 'Ссылка не найдена на странице или в письме'}"
+                )
+                send_photo_to_telegram(chat_id, screen, caption)
 
             time.sleep(3)
 
