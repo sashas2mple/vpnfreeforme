@@ -1,10 +1,15 @@
-name: Auto Trial VPN (Every 3 Days)
+
+
+name: Auto Trial VPN (Every 71 Hours)
 
 on:
   schedule:
-    # Запускается каждые 3 дня в 08:00 UTC (11:00 по Москве)
-    - cron: '0 8 */3 * *'
-  workflow_dispatch:
+    # Проверяет таймер каждый час, чтобы никогда не пропустить отправку
+    - cron: '0 * * * *'
+  workflow_dispatch: # Ручной запуск кнопкой Run workflow
+
+permissions:
+  contents: write
 
 jobs:
   send-vpn-subs:
@@ -13,17 +18,45 @@ jobs:
       - name: Скачиваем код
         uses: actions/checkout@v4
 
+      - name: Проверяем, прошёл ли 71 час с прошлой отправки
+        id: check_time
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Ручной запуск — отправляем ссылки прямо сейчас!"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if [ ! -f last_run.txt ]; then
+            echo "Первый запуск по таймеру — отправляем ссылки!"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          LAST_RUN=$(cat last_run.txt | tr -d '[:space:]')
+          NOW=$(date +%s)
+          DIFF=$((NOW - LAST_RUN))
+          # 71 час = 255600 секунд
+          if [ "$DIFF" -ge 255600 ]; then
+            echo "Прошло $((DIFF / 3600)) ч. (>= 71 ч.) — запускаем генерацию подписок!"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "Прошло $((DIFF / 3600)) ч. из 71 ч. — ждём дальше."
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Устанавливаем Python
+        if: steps.check_time.outputs.should_run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Устанавливаем библиотеки и браузер
+        if: steps.check_time.outputs.should_run == 'true'
         run: |
           pip install requests playwright
           playwright install --with-deps chromium
 
-      - name: Генерируем 3 подписки в инкогнито и отправляем в Telegram
+      - name: Генерируем подписки и отправляем в Telegram
+        if: steps.check_time.outputs.should_run == 'true'
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           CHAT_ID_1: ${{ secrets.CHAT_ID_1 }}
@@ -31,3 +64,13 @@ jobs:
           CHAT_ID_3: ${{ secrets.CHAT_ID_3 }}
           CHAT_ID_4: ${{ secrets.CHAT_ID_4 }}
         run: python auto_trial.py
+
+      - name: Запоминаем точное время отправки (для отсчёта 71 часа)
+        if: steps.check_time.outputs.should_run == 'true'
+        run: |
+          date +%s > last_run.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_run.txt
+          git diff --staged --quiet || git commit -m "Update last_run timestamp (71h timer)"
+          git push
