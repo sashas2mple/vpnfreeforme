@@ -29,4 +29,5 @@ jobs:
           CHAT_ID_1: ${{ secrets.CHAT_ID_1 }}
           CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
           CHAT_ID_3: ${{ secrets.CHAT_ID_3 }}
+          CHAT_ID_4: ${{ secrets.CHAT_ID_4 }}
         run: python auto_trial.py
