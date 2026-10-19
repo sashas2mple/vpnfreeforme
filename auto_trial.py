@@ -16,6 +16,7 @@ USERS = [
     {"name": "Пользователь 1 (Ты)", "chat_id": os.environ.get("CHAT_ID_1")},
     {"name": "Пользователь 2 (Друг 1)", "chat_id": os.environ.get("CHAT_ID_2")},
     {"name": "Пользователь 3 (Друг 2)", "chat_id": os.environ.get("CHAT_ID_3")},
+    {"name": "Пользователь 4 (Друг 3)", "chat_id": os.environ.get("CHAT_ID_4")},
 ]
 
 def create_temp_email():
