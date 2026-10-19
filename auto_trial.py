@@ -11,7 +11,7 @@ TRIAL_URL = "https://power-vps.pro/free-trial/"
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 MAX_RETRIES = 3
 
-# Твой ID — ошибки и скриншоты при сбоях приходят ТОЛЬКО сюда (друзьям никогда не отправляются)
+# Твой ID — ошибки и скриншоты при сбоях приходят ТОЛЬКО сюда
 ADMIN_CHAT_ID = os.environ.get("CHAT_ID_1")
 
 # Все 4 пользователя
@@ -31,7 +31,6 @@ def create_temp_email():
             if not domains:
                 time.sleep(3)
                 continue
-
             domain = random.choice(domains)["domain"]
             username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
             email = f"{username}@{domain}"
@@ -100,7 +99,7 @@ def find_email_input(page):
         'input[placeholder*="почт" i]',
         'input[placeholder*="@" i]',
         'input[type="text"]',
-        'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])',
+        'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])'
     ]
     for frame in [page.main_frame] + [f for f in page.frames if f != page.main_frame]:
         for sel in selectors:
@@ -120,12 +119,11 @@ def open_email_form(page):
     if email_input:
         return email_input, frame
 
-    # Список кнопок, которые открывают форму почты на сайте
     triggers = [
         page.get_by_text("Получить на E-mail", exact=False),
         page.get_by_text("Получить VPN", exact=True),
         page.locator('a:has-text("Получить на E-mail"), button:has-text("Получить на E-mail")'),
-        page.locator('a:has-text("Получить VPN"):not(:has-text("Telegram")), button:has-text("Получить VPN"):not(:has-text("Telegram"))'),
+        page.locator('a:has-text("Получить VPN"):not(:has-text("Telegram")), button:has-text("Получить VPN"):not(:has-text("Telegram"))')
     ]
 
     for loc in triggers:
@@ -148,7 +146,6 @@ def open_email_form(page):
 def extract_from_sub_page(page):
     page_url = page.url
     happ_deeplink = None
-
     try:
         happ_tab = page.get_by_text("Happ", exact=True).first
         if happ_tab.count() > 0 and happ_tab.is_visible():
@@ -180,7 +177,7 @@ def get_trial_in_incognito(browser):
 
     context = browser.new_context(
         viewport={"width": 1280, "height": 900},
-        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
     page = context.new_page()
 
@@ -198,7 +195,21 @@ def get_trial_in_incognito(browser):
         if not email_input:
             raise RuntimeError("После нажатия кнопок 'Получить на E-mail' и 'Получить VPN' поле ввода почты не появилось")
 
-        # 2. Заполняем почту
+        # 2. Заполняем обязательное поле «Ваше имя» (и любые другие текстовые поля формы)
+        text_inputs = target_frame.locator(
+            'input[type="text"], input[name*="name" i], input[placeholder*="имя" i], '
+            'input:not([type]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])'
+        )
+        for i in range(text_inputs.count()):
+            inp = text_inputs.nth(i)
+            if inp.is_visible():
+                try:
+                    inp.fill("Alex")
+                except Exception:
+                    pass
+        page.wait_for_timeout(300)
+
+        # 3. Заполняем поле E-mail (перезапишет почту, даже если она попала в общий список выше)
         email_input.fill(email)
         page.wait_for_timeout(500)
 
@@ -209,9 +220,12 @@ def get_trial_in_incognito(browser):
             if cb.is_visible() and not cb.is_checked():
                 cb.check(force=True)
 
-        # 3. Ищем кнопку отправки формы
+        # 4. Ищем и нажимаем кнопку «ПОЛУЧИТЬ VPN ДОСТУП»
         clicked_submit = False
         submit_selectors = [
+            'button:has-text("ПОЛУЧИТЬ VPN ДОСТУП")',
+            'button:has-text("Получить VPN доступ")',
+            'input[value*="ПОЛУЧИТЬ" i]',
             'form button[type="submit"]',
             'form input[type="submit"]',
             'button[type="submit"]',
@@ -238,7 +252,7 @@ def get_trial_in_incognito(browser):
 
         page.wait_for_timeout(6000)
 
-        # 4. Проверяем, появилась ли ссылка на странице или в письме
+        # 5. Проверяем, появилась ли ссылка на странице или в письме
         after_links = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
         new_links = [
             l for l in after_links
@@ -299,16 +313,14 @@ def get_trial_with_retries(browser, user_name):
     return last_result
 
 def send_to_telegram(chat_id, sub_page_url, happ_link):
-    text_lines = ["🔄 <b>Твоя новая подписка VPN на 3 дня готова!</b>\n"]
-
+    text_lines = ["🔥 <b>Твоя новая подписка VPN на 3 дня готова!</b>\n"]
     if sub_page_url and sub_page_url.startswith("http"):
         text_lines.append(f"🌐 <b>Страница подписки:</b>\n<code>{sub_page_url}</code>\n")
-
     if happ_link:
-        text_lines.append(f"⚡ <b>Прямая ссылка для Happ:</b>\n<code>{happ_link}</code>\n")
+        text_lines.append(f"📲 <b>Прямая ссылка для Happ:</b>\n<code>{happ_link}</code>\n")
 
     text_lines.append(
-        "💡 <b>Как добавить (на iPhone и Mac):</b>\n"
+        "<b>Как добавить (на iPhone и Mac):</b>\n"
         "1. Нажми кнопку <b>«➕ Открыть страницу подписки»</b> ниже и нажми <b>«+ Добавить подписку»</b>.\n"
         "2. Либо скопируй ссылку выше, открой <b>Happ</b> → нажми <b>«+»</b> → <b>«Вставить из буфера»</b>."
     )
@@ -319,7 +331,6 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-
     if sub_page_url and sub_page_url.startswith("http"):
         payload["reply_markup"] = {
             "inline_keyboard": [
@@ -339,37 +350,32 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
 def main():
     if not TG_BOT_TOKEN:
         print("[-] КРИТИЧЕСКАЯ ОШИБКА: Секрет TG_BOT_TOKEN не задан!")
-        return
+        raise SystemExit(1)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-
         for idx, user in enumerate(USERS):
             chat_id = user["chat_id"]
             if not chat_id:
                 continue
 
             sub_page_url, happ_link, screen, err, email = get_trial_with_retries(browser, user["name"])
-
             if sub_page_url or happ_link:
                 print(f"[+] Успешно для {user['name']}! Страница: {sub_page_url} | Happ: {happ_link}")
                 send_to_telegram(chat_id, sub_page_url, happ_link)
             else:
-                # Отправляем уведомление об ошибке ТОЛЬКО тебе (ADMIN_CHAT_ID), а не друзьям!
                 caption = (
                     f"⚠️ Не удалось получить ссылку для «{user['name']}» после {MAX_RETRIES} попыток (почта {email}).\n"
                     f"Друзьям ничего не отправлено.\n"
                     f"Детали: {err or 'Ссылка не найдена'}"
                 )
                 send_admin_debug(screen, caption)
-                # Если даже на первом пользователе сайт не выдал ссылку — останавливаем цикл, чтобы не ждать впустую
                 if idx == 0:
                     print("[-] Остановка цикла, так как первая генерация не удалась.")
                     browser.close()
                     raise SystemExit(1)
 
             time.sleep(3)
-
         browser.close()
 
 if __name__ == "__main__":
