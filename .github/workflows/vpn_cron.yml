@@ -1,12 +1,9 @@
-
-
 name: Auto Trial VPN (Every 71 Hours)
 
 on:
   schedule:
-    # Проверяет таймер каждый час, чтобы никогда не пропустить отправку
     - cron: '0 * * * *'
-  workflow_dispatch: # Ручной запуск кнопкой Run workflow
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,24 +19,19 @@ jobs:
         id: check_time
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Ручной запуск — отправляем ссылки прямо сейчас!"
             echo "should_run=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           if [ ! -f last_run.txt ]; then
-            echo "Первый запуск по таймеру — отправляем ссылки!"
             echo "should_run=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           LAST_RUN=$(cat last_run.txt | tr -d '[:space:]')
           NOW=$(date +%s)
           DIFF=$((NOW - LAST_RUN))
-          # 71 час = 255600 секунд
           if [ "$DIFF" -ge 255600 ]; then
-            echo "Прошло $((DIFF / 3600)) ч. (>= 71 ч.) — запускаем генерацию подписок!"
             echo "should_run=true" >> $GITHUB_OUTPUT
           else
-            echo "Прошло $((DIFF / 3600)) ч. из 71 ч. — ждём дальше."
             echo "should_run=false" >> $GITHUB_OUTPUT
           fi
 
