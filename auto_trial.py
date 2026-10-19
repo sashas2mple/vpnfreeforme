@@ -9,8 +9,12 @@ from playwright.sync_api import sync_playwright
 MAIL_API = "https://api.mail.tm"
 TRIAL_URL = "https://power-vps.pro/free-trial/"
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
-MAX_RETRIES = 3  # Количество попыток для каждого пользователя при любой ошибке
+MAX_RETRIES = 3
 
+# Твой ID — ошибки и скриншоты при сбоях приходят ТОЛЬКО сюда (друзьям никогда не отправляются)
+ADMIN_CHAT_ID = os.environ.get("CHAT_ID_1")
+
+# Все 4 пользователя
 USERS = [
     {"name": "Пользователь 1 (Ты)", "chat_id": os.environ.get("CHAT_ID_1")},
     {"name": "Пользователь 2 (Друг 1)", "chat_id": os.environ.get("CHAT_ID_2")},
@@ -19,7 +23,7 @@ USERS = [
 ]
 
 def create_temp_email():
-    """Создаёт временную почту с защитой от сбоев (до 3 попыток)"""
+    """Создаёт временную почту на mail.tm (до 3 попыток)"""
     for attempt in range(1, 4):
         try:
             domains_resp = requests.get(f"{MAIL_API}/domains", timeout=15)
@@ -41,7 +45,7 @@ def create_temp_email():
         except Exception as e:
             print(f"[-] Попытка {attempt}/3 создания почты не удалась: {e}")
             time.sleep(3)
-    raise RuntimeError("Не удалось создать временную почту на mail.tm после 3 попыток")
+    raise RuntimeError("Не удалось создать временную почту на mail.tm")
 
 def wait_for_email_link(token, timeout=45):
     headers = {"Authorization": f"Bearer {token}"}
@@ -65,39 +69,94 @@ def wait_for_email_link(token, timeout=45):
         time.sleep(3)
     return []
 
-def send_photo_to_telegram(chat_id, photo_path, caption):
-    if not TG_BOT_TOKEN or not chat_id:
+def send_admin_debug(photo_path, caption):
+    """Отправляет отчёт об ошибке ТОЛЬКО тебе (ADMIN_CHAT_ID), чтобы не спамить друзьям"""
+    if not TG_BOT_TOKEN or not ADMIN_CHAT_ID:
         return
     try:
-        if os.path.exists(photo_path):
+        if photo_path and os.path.exists(photo_path):
             with open(photo_path, "rb") as photo:
                 requests.post(
                     f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
-                    data={"chat_id": chat_id, "caption": caption[:1000]},
+                    data={"chat_id": ADMIN_CHAT_ID, "caption": caption[:1000]},
                     files={"photo": photo},
                     timeout=20
                 )
         else:
             requests.post(
                 f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": caption[:4000]},
+                json={"chat_id": ADMIN_CHAT_ID, "text": caption[:4000]},
                 timeout=15
             )
     except Exception as e:
-        print(f"[-] Ошибка отправки отчёта в Telegram: {e}")
+        print(f"[-] Ошибка отправки отчёта админу: {e}")
+
+def find_email_input(page):
+    """Ищет видимое поле ввода почты на странице и внутри всех iframe"""
+    selectors = [
+        'input[type="email"]',
+        'input[name*="mail" i]',
+        'input[placeholder*="mail" i]',
+        'input[placeholder*="почт" i]',
+        'input[placeholder*="@" i]',
+        'input[type="text"]',
+        'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])',
+    ]
+    for frame in [page.main_frame] + [f for f in page.frames if f != page.main_frame]:
+        for sel in selectors:
+            try:
+                loc = frame.locator(sel)
+                for i in range(loc.count()):
+                    el = loc.nth(i)
+                    if el.is_visible():
+                        return el, frame
+            except Exception:
+                pass
+    return None, None
+
+def open_email_form(page):
+    """По очереди нажимает кнопки открытия E-mail формы, пока не появится поле ввода почты"""
+    email_input, frame = find_email_input(page)
+    if email_input:
+        return email_input, frame
+
+    # Список кнопок, которые открывают форму почты на сайте
+    triggers = [
+        page.get_by_text("Получить на E-mail", exact=False),
+        page.get_by_text("Получить VPN", exact=True),
+        page.locator('a:has-text("Получить на E-mail"), button:has-text("Получить на E-mail")'),
+        page.locator('a:has-text("Получить VPN"):not(:has-text("Telegram")), button:has-text("Получить VPN"):not(:has-text("Telegram"))'),
+    ]
+
+    for loc in triggers:
+        try:
+            count = loc.count()
+            for i in range(count):
+                el = loc.nth(i)
+                if el.is_visible():
+                    el.scroll_into_view_if_needed(timeout=3000)
+                    el.click(timeout=3000)
+                    page.wait_for_timeout(2000)
+                    email_input, frame = find_email_input(page)
+                    if email_input:
+                        return email_input, frame
+        except Exception as e:
+            print(f"[-] Попытка клика по кнопке формы: {e}")
+
+    return None, None
 
 def extract_from_sub_page(page):
     page_url = page.url
     happ_deeplink = None
 
     try:
-        happ_tab = page.locator('text="Happ"').first
-        if happ_tab.is_visible(timeout=3000):
+        happ_tab = page.get_by_text("Happ", exact=True).first
+        if happ_tab.count() > 0 and happ_tab.is_visible():
             happ_tab.click()
             page.wait_for_timeout(1000)
 
         add_btn = page.locator('a:has-text("Добавить подписку"), button:has-text("Добавить подписку")').first
-        if add_btn.is_visible(timeout=3000):
+        if add_btn.count() > 0 and add_btn.is_visible():
             href = add_btn.get_attribute("href")
             if href:
                 happ_deeplink = href
@@ -134,44 +193,52 @@ def get_trial_in_incognito(browser):
 
         before_links = set(page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)"))
 
-        # 1. Нажимаем кнопку "Получить на E-mail"
-        email_trigger = page.locator('text="Получить на E-mail", text="Получить VPN"').first
-        if email_trigger.is_visible(timeout=5000):
-            email_trigger.click()
-            page.wait_for_timeout(2000)
+        # 1. Открываем форму ввода почты и находим поле ввода
+        email_input, target_frame = open_email_form(page)
+        if not email_input:
+            raise RuntimeError("После нажатия кнопок 'Получить на E-mail' и 'Получить VPN' поле ввода почты не появилось")
 
-        # 2. Вводим почту
-        email_input = page.locator(
-            'input[type="email"]:visible, input[name*="mail" i]:visible, '
-            'input[placeholder*="mail" i]:visible, input[placeholder*="почт" i]:visible, '
-            'input[type="text"]:visible'
-        ).first
-        email_input.wait_for(state="visible", timeout=10000)
+        # 2. Заполняем почту
         email_input.fill(email)
         page.wait_for_timeout(500)
 
         # Отмечаем галочки согласия, если они есть
-        checkboxes = page.locator('input[type="checkbox"]:visible')
+        checkboxes = target_frame.locator('input[type="checkbox"]')
         for i in range(checkboxes.count()):
             cb = checkboxes.nth(i)
-            if not cb.is_checked():
+            if cb.is_visible() and not cb.is_checked():
                 cb.check(force=True)
 
-        # 3. Отправляем форму
-        submit_btn = page.locator(
-            'form button[type="submit"]:visible, form input[type="submit"]:visible, '
-            'button[type="submit"]:visible, input[type="submit"]:visible, '
-            'form button:visible'
-        ).first
+        # 3. Ищем кнопку отправки формы
+        clicked_submit = False
+        submit_selectors = [
+            'form button[type="submit"]',
+            'form input[type="submit"]',
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'form button',
+            'button:has-text("Получить")',
+            'button:has-text("Отправить")',
+            'button:has-text("Активировать")',
+            'button:has-text("Подключить")',
+        ]
+        for sel in submit_selectors:
+            loc = target_frame.locator(sel)
+            for i in range(loc.count()):
+                btn = loc.nth(i)
+                if btn.is_visible():
+                    btn.click()
+                    clicked_submit = True
+                    break
+            if clicked_submit:
+                break
 
-        if submit_btn.is_visible(timeout=3000):
-            submit_btn.click()
-        else:
+        if not clicked_submit:
             email_input.press("Enter")
 
         page.wait_for_timeout(6000)
 
-        # 4. Ищем появившуюся ссылку
+        # 4. Проверяем, появилась ли ссылка на странице или в письме
         after_links = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
         new_links = [
             l for l in after_links
@@ -206,12 +273,12 @@ def get_trial_in_incognito(browser):
                 if sub_page_url or happ_link:
                     break
 
-        page.screenshot(path=screenshot_path, full_page=False)
+        page.screenshot(path=screenshot_path, full_page=True)
     except Exception as e:
         error_text = str(e)
         print(f"[-] Ошибка при оформлении триала: {e}")
         try:
-            page.screenshot(path=screenshot_path, full_page=False)
+            page.screenshot(path=screenshot_path, full_page=True)
         except Exception:
             pass
     finally:
@@ -220,7 +287,6 @@ def get_trial_in_incognito(browser):
     return sub_page_url, happ_link, screenshot_path, error_text, email
 
 def get_trial_with_retries(browser, user_name):
-    """Пытается получить ссылку до MAX_RETRIES раз, чтобы исключить случайные сбои"""
     last_result = (None, None, "debug_screen.png", "Неизвестная ошибка", "не создана")
     for attempt in range(1, MAX_RETRIES + 1):
         print(f"[*] {user_name}: Попытка {attempt} из {MAX_RETRIES}...")
@@ -228,12 +294,12 @@ def get_trial_with_retries(browser, user_name):
         last_result = (sub_page_url, happ_link, screen, err, email)
         if sub_page_url or happ_link:
             return last_result
-        print(f"[-] Попытка {attempt} не дала ссылку. Ждём 5 секунд перед повтором...")
+        print(f"[-] Попытка {attempt} не дала ссылку. Ждём 5 секунд...")
         time.sleep(5)
     return last_result
 
 def send_to_telegram(chat_id, sub_page_url, happ_link):
-    text_lines = ["🔄 <b>Твоя новая подписка VPN (каждые 71 ч.) готова!</b>\n"]
+    text_lines = ["🔄 <b>Твоя новая подписка VPN на 3 дня готова!</b>\n"]
 
     if sub_page_url and sub_page_url.startswith("http"):
         text_lines.append(f"🌐 <b>Страница подписки:</b>\n<code>{sub_page_url}</code>\n")
@@ -278,26 +344,28 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
 
-        for user in USERS:
+        for idx, user in enumerate(USERS):
             chat_id = user["chat_id"]
             if not chat_id:
                 continue
 
-            try:
-                sub_page_url, happ_link, screen, err, email = get_trial_with_retries(browser, user["name"])
+            sub_page_url, happ_link, screen, err, email = get_trial_with_retries(browser, user["name"])
 
-                if sub_page_url or happ_link:
-                    print(f"[+] Успешно для {user['name']}! Страница: {sub_page_url} | Happ: {happ_link}")
-                    send_to_telegram(chat_id, sub_page_url, happ_link)
-                else:
-                    caption = (
-                        f"⚠️ Все {MAX_RETRIES} попытки получить ссылку не удались (последняя почта {email}).\n"
-                        f"Детали: {err or 'Ссылка не найдена'}"
-                    )
-                    send_photo_to_telegram(chat_id, screen, caption)
-            except Exception as e:
-                print(f"[-] Критическая ошибка в цикле для {user['name']}: {e}")
-                send_photo_to_telegram(chat_id, "debug_screen.png", f"⚠️ Ошибка скрипта: {e}")
+            if sub_page_url or happ_link:
+                print(f"[+] Успешно для {user['name']}! Страница: {sub_page_url} | Happ: {happ_link}")
+                send_to_telegram(chat_id, sub_page_url, happ_link)
+            else:
+                # Отправляем уведомление об ошибке ТОЛЬКО тебе (ADMIN_CHAT_ID), а не друзьям!
+                caption = (
+                    f"⚠️ Не удалось получить ссылку для «{user['name']}» после {MAX_RETRIES} попыток (почта {email}).\n"
+                    f"Друзьям ничего не отправлено.\n"
+                    f"Детали: {err or 'Ссылка не найдена'}"
+                )
+                send_admin_debug(screen, caption)
+                # Если даже на первом пользователе сайт не выдал ссылку — останавливаем цикл, чтобы не ждать впустую
+                if idx == 0:
+                    print("[-] Остановка цикла, так как первая генерация не удалась.")
+                    break
 
             time.sleep(3)
 
