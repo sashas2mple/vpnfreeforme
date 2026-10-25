@@ -2,9 +2,21 @@ name: Auto Trial VPN (Every 71 Hours)
 
 on:
   schedule:
-    # Проверка каждые 20 минут (на 12, 32 и 52 минуте), чтобы GitHub никогда не задерживал запуск
     - cron: '12,32,52 * * * *'
   workflow_dispatch:
+    inputs:
+      target_user:
+        description: 'Кому отправить ссылку?'
+        required: true
+        default: 'Всем (обычный запуск со сбросом таймера)'
+        type: choice
+        options:
+          - 'Всем (обычный запуск со сбросом таймера)'
+          - '1 — Только мне (без сброса таймера)'
+          - '2 — Только Другу 1 (без сброса таймера)'
+          - '3 — Только Другу 2 (без сброса таймера)'
+          - '4 — Только Другу 3 (без сброса таймера)'
+          - '5 — Только Другу 4 (без сброса таймера)'
 
 permissions:
   contents: write
@@ -34,8 +46,8 @@ jobs:
           fi
           LAST_RUN=$(cat last_run.txt | tr -d '[:space:]')
           DIFF=$((NOW - LAST_RUN))
-          # 254700 секунд = 70 часов 45 минут (чтобы с проверкой раз в 20 мин попадать ровно в ~71 час)
-          if [ "$DIFF" -ge 254700 ]; then
+          # 252600 секунд = 70 ч. 10 мин. (с учётом очереди GitHub придёт ровно к ~71 ч.)
+          if [ "$DIFF" -ge 252600 ]; then
             echo "Прошло $((DIFF / 3600)) ч. $(((DIFF % 3600) / 60)) мин. — пора запускать!"
             echo "should_run=true" >> $GITHUB_OUTPUT
           else
@@ -64,10 +76,11 @@ jobs:
           CHAT_ID_3: ${{ secrets.CHAT_ID_3 }}
           CHAT_ID_4: ${{ secrets.CHAT_ID_4 }}
           CHAT_ID_5: ${{ secrets.CHAT_ID_5 }}
+          TARGET_USER: ${{ github.event.inputs.target_user }}
         run: python auto_trial.py
 
-      - name: Запоминаем точное время старта (для отсчёта 71 часа)
-        if: steps.check_time.outputs.should_run == 'true'
+      - name: Запоминаем точное время старта (только при общем запуске)
+        if: steps.check_time.outputs.should_run == 'true' && (github.event_name == 'schedule' || github.event.inputs.target_user == 'Всем (обычный запуск со сбросом таймера)')
         run: |
           echo "${{ steps.check_time.outputs.run_start }}" > last_run.txt
           git config user.name "github-actions[bot]"
