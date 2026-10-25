@@ -2,7 +2,8 @@ name: Auto Trial VPN (Every 71 Hours)
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    # Проверка каждые 20 минут (на 12, 32 и 52 минуте), чтобы GitHub никогда не задерживал запуск
+    - cron: '12,32,52 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -18,20 +19,27 @@ jobs:
       - name: Проверяем, прошёл ли 71 час с прошлой отправки
         id: check_time
         run: |
+          NOW=$(date +%s)
+          echo "run_start=$NOW" >> $GITHUB_OUTPUT
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Ручной запуск — старт!"
             echo "should_run=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           if [ ! -f last_run.txt ]; then
+            echo "Файл last_run.txt не найден — первый запуск!"
             echo "should_run=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           LAST_RUN=$(cat last_run.txt | tr -d '[:space:]')
-          NOW=$(date +%s)
           DIFF=$((NOW - LAST_RUN))
-          if [ "$DIFF" -ge 255600 ]; then
+          # 254700 секунд = 70 часов 45 минут (чтобы с проверкой раз в 20 мин попадать ровно в ~71 час)
+          if [ "$DIFF" -ge 254700 ]; then
+            echo "Прошло $((DIFF / 3600)) ч. $(((DIFF % 3600) / 60)) мин. — пора запускать!"
             echo "should_run=true" >> $GITHUB_OUTPUT
           else
+            echo "Прошло $((DIFF / 3600)) ч. $(((DIFF % 3600) / 60)) мин. из 71 ч. — ждём."
             echo "should_run=false" >> $GITHUB_OUTPUT
           fi
 
@@ -58,12 +66,13 @@ jobs:
           CHAT_ID_5: ${{ secrets.CHAT_ID_5 }}
         run: python auto_trial.py
 
-      - name: Запоминаем точное время отправки (для отсчёта 71 часа)
+      - name: Запоминаем точное время старта (для отсчёта 71 часа)
         if: steps.check_time.outputs.should_run == 'true'
         run: |
-          date +%s > last_run.txt
+          echo "${{ steps.check_time.outputs.run_start }}" > last_run.txt
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add last_run.txt
           git diff --staged --quiet || git commit -m "Update last_run timestamp (71h timer)"
+          git pull --rebase origin main || true
           git push
