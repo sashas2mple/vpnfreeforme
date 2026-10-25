@@ -373,12 +373,24 @@ def main():
         print("[-] КРИТИЧЕСКАЯ ОШИБКА: Секрет TG_BOT_TOKEN не задан!")
         raise SystemExit(1)
 
-    active_users = [u for u in USERS if u.get("chat_id")]
+    target_input = os.environ.get("TARGET_USER", "").strip()
+    if target_input and target_input[0] in ("1", "2", "3", "4", "5"):
+        idx = int(target_input[0]) - 1
+        selected_user = USERS[idx]
+        print(f"[*] Одиночный запуск: отправляем ТОЛЬКО для «{selected_user['name']}» (таймер 71ч не трогаем)")
+        active_users = [selected_user] if selected_user.get("chat_id") else []
+    else:
+        active_users = [u for u in USERS if u.get("chat_id")]
+
+    if not active_users:
+        print("[-] У выбранного пользователя не задан CHAT_ID в Secrets!")
+        raise SystemExit(1)
+
     failed_users = []
     success_count = 0
 
     with sync_playwright() as p:
-        # ВОЛНА 1: Основной проход по всем пользователям
+        # ВОЛНА 1: Основной проход
         browser = p.chromium.launch(headless=True)
         for user in active_users:
             sub_page_url, happ_link, screen, err, email = get_trial_with_retries(browser, user["name"])
@@ -392,7 +404,7 @@ def main():
             time.sleep(4)
         browser.close()
 
-        # ВОЛНА 2: Если у кого-то случился сбой — ждём 2 минуты и пробуем ещё раз в новом браузере
+        # ВОЛНА 2: Повтор через 2 минуты при сбое
         if failed_users:
             print(f"\n[*] Ждём 120 секунд (2 минуты) перед повторной попыткой для {len(failed_users)} чел...")
             time.sleep(120)
@@ -410,7 +422,6 @@ def main():
                 time.sleep(4)
             browser.close()
 
-            # Если даже после паузы в 2 минуты и 6 попыток кто-то не получил ссылку — пишем ТОЛЬКО админу
             for user, screen, err, email in still_failed:
                 caption = (
                     f"⚠️ Не удалось получить ссылку для «{user['name']}» после 2 волн по {MAX_RETRIES_PER_WAVE} попытки (почта {email}).\n"
@@ -419,10 +430,8 @@ def main():
                 )
                 send_admin_debug(screen, caption)
 
-    # Если вообще ни одна ссылка не сгенерировалась (например, сайт лежал) —
-    # выходим с кодом ошибки 1, чтобы last_run.txt НЕ обновлялся и через 20 минут скрипт запустился снова!
     if active_users and success_count == 0:
-        print("[-] Ни одна ссылка не была получена. Таймер 71ч не сбрасываем, повтор через 20 минут.")
+        print("[-] Ссылка не была получена.")
         raise SystemExit(1)
 
 if __name__ == "__main__":
