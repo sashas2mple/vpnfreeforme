@@ -6,56 +6,74 @@ import string
 import requests
 from playwright.sync_api import sync_playwright
 
-MAIL_API = "https://api.mail.tm"
+# Два независимых почтовых сервиса (основной + резервный) для защиты от лимитов на 5 человек
+MAIL_APIS = ["https://api.mail.tm", "https://api.mail.gw"]
 TRIAL_URL = "https://power-vps.pro/free-trial/"
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
-MAX_RETRIES = 3
+MAX_RETRIES_PER_WAVE = 3
 
 # Твой ID — ошибки и скриншоты при сбоях приходят ТОЛЬКО сюда
 ADMIN_CHAT_ID = os.environ.get("CHAT_ID_1")
 
-# Все 4 пользователя
+# Все 5 пользователей
 USERS = [
     {"name": "Пользователь 1 (Ты)", "chat_id": os.environ.get("CHAT_ID_1")},
     {"name": "Пользователь 2 (Друг 1)", "chat_id": os.environ.get("CHAT_ID_2")},
     {"name": "Пользователь 3 (Друг 2)", "chat_id": os.environ.get("CHAT_ID_3")},
     {"name": "Пользователь 4 (Друг 3)", "chat_id": os.environ.get("CHAT_ID_4")},
-    {"name": "Пользователь 4 (Друг 3)", "chat_id": os.environ.get("CHAT_ID_5")},
+    {"name": "Пользователь 5 (Друг 4)", "chat_id": os.environ.get("CHAT_ID_5")},
 ]
 
 def create_temp_email():
-    """Создаёт временную почту на mail.tm (до 3 попыток)"""
-    for attempt in range(1, 4):
+    """Создаёт временную почту, чередуя mail.tm и mail.gw при любых задержках"""
+    for attempt in range(1, 7):
+        api_base = MAIL_APIS[(attempt - 1) % len(MAIL_APIS)]
         try:
-            domains_resp = requests.get(f"{MAIL_API}/domains", timeout=15)
+            domains_resp = requests.get(f"{api_base}/domains", timeout=15)
+            if domains_resp.status_code != 200:
+                time.sleep(3)
+                continue
             domains = domains_resp.json().get("hydra:member", [])
             if not domains:
                 time.sleep(3)
                 continue
+
             domain = random.choice(domains)["domain"]
-            username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+            username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=11))
             email = f"{username}@{domain}"
             password = "TempPassword123!"
 
-            requests.post(f"{MAIL_API}/accounts", json={"address": email, "password": password}, timeout=15)
-            token_resp = requests.post(f"{MAIL_API}/token", json={"address": email, "password": password}, timeout=15).json()
+            acc_resp = requests.post(
+                f"{api_base}/accounts",
+                json={"address": email, "password": password},
+                timeout=15
+            )
+            if acc_resp.status_code not in (200, 201):
+                time.sleep(3)
+                continue
+
+            token_resp = requests.post(
+                f"{api_base}/token",
+                json={"address": email, "password": password},
+                timeout=15
+            ).json()
             token = token_resp.get("token")
             if token:
-                return email, token
+                return email, token, api_base
         except Exception as e:
-            print(f"[-] Попытка {attempt}/3 создания почты не удалась: {e}")
-            time.sleep(3)
-    raise RuntimeError("Не удалось создать временную почту на mail.tm")
+            print(f"[-] Попытка {attempt}/6 создания почты ({api_base}) не удалась: {e}")
+            time.sleep(4)
+    raise RuntimeError("Не удалось создать временную почту ни на mail.tm, ни на mail.gw")
 
-def wait_for_email_link(token, timeout=45):
+def wait_for_email_link(api_base, token, timeout=60):
     headers = {"Authorization": f"Bearer {token}"}
     start = time.time()
     while time.time() - start < timeout:
         try:
-            msgs = requests.get(f"{MAIL_API}/messages", headers=headers, timeout=15).json().get("hydra:member", [])
+            msgs = requests.get(f"{api_base}/messages", headers=headers, timeout=15).json().get("hydra:member", [])
             if msgs:
                 msg_id = msgs[0]["id"]
-                msg = requests.get(f"{MAIL_API}/messages/{msg_id}", headers=headers, timeout=15).json()
+                msg = requests.get(f"{api_base}/messages/{msg_id}", headers=headers, timeout=15).json()
                 text = msg.get("text", "") or str(msg.get("html", ""))
                 links = re.findall(r'(https?://[^\s"\'<>]+|happ://[^\s"\'<>]+)', text)
                 valid_links = [
@@ -178,25 +196,25 @@ def get_trial_in_incognito(browser):
 
     context = browser.new_context(
         viewport={"width": 1280, "height": 900},
-        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     )
     page = context.new_page()
 
     try:
-        email, token = create_temp_email()
-        print(f"[+] Сгенерирована почта: {email}")
+        email, token, api_base = create_temp_email()
+        print(f"[+] Сгенерирована почта: {email} ({api_base})")
 
-        page.goto(TRIAL_URL, wait_until="domcontentloaded", timeout=25000)
+        page.goto(TRIAL_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(3000)
 
         before_links = set(page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)"))
 
-        # 1. Открываем форму ввода почты и находим поле ввода
+        # 1. Открываем форму ввода почты
         email_input, target_frame = open_email_form(page)
         if not email_input:
             raise RuntimeError("После нажатия кнопок 'Получить на E-mail' и 'Получить VPN' поле ввода почты не появилось")
 
-        # 2. Заполняем обязательное поле «Ваше имя» (и любые другие текстовые поля формы)
+        # 2. Заполняем обязательное поле «Ваше имя»
         text_inputs = target_frame.locator(
             'input[type="text"], input[name*="name" i], input[placeholder*="имя" i], '
             'input:not([type]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])'
@@ -210,18 +228,18 @@ def get_trial_in_incognito(browser):
                     pass
         page.wait_for_timeout(300)
 
-        # 3. Заполняем поле E-mail (перезапишет почту, даже если она попала в общий список выше)
+        # 3. Заполняем поле E-mail
         email_input.fill(email)
         page.wait_for_timeout(500)
 
-        # Отмечаем галочки согласия, если они есть
+        # Отмечаем галочки согласия
         checkboxes = target_frame.locator('input[type="checkbox"]')
         for i in range(checkboxes.count()):
             cb = checkboxes.nth(i)
             if cb.is_visible() and not cb.is_checked():
                 cb.check(force=True)
 
-        # 4. Ищем и нажимаем кнопку «ПОЛУЧИТЬ VPN ДОСТУП»
+        # 4. Нажимаем кнопку получения доступа
         clicked_submit = False
         submit_selectors = [
             'button:has-text("ПОЛУЧИТЬ VPN ДОСТУП")',
@@ -271,18 +289,18 @@ def get_trial_in_incognito(browser):
             if target.startswith("happ://"):
                 happ_link = target
             else:
-                page.goto(target, wait_until="domcontentloaded", timeout=25000)
+                page.goto(target, wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(3000)
                 sub_page_url, happ_link = extract_from_sub_page(page)
         else:
             print("[*] Проверяем письмо на почте...")
-            email_links = wait_for_email_link(token)
+            email_links = wait_for_email_link(api_base, token, timeout=60)
             for link in email_links:
                 print(f"[+] Ссылка из письма: {link}")
                 if link.startswith("happ://"):
                     happ_link = link
                     break
-                page.goto(link, wait_until="domcontentloaded", timeout=25000)
+                page.goto(link, wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(3000)
                 sub_page_url, happ_link = extract_from_sub_page(page)
                 if sub_page_url or happ_link:
@@ -303,14 +321,15 @@ def get_trial_in_incognito(browser):
 
 def get_trial_with_retries(browser, user_name):
     last_result = (None, None, "debug_screen.png", "Неизвестная ошибка", "не создана")
-    for attempt in range(1, MAX_RETRIES + 1):
-        print(f"[*] {user_name}: Попытка {attempt} из {MAX_RETRIES}...")
+    for attempt in range(1, MAX_RETRIES_PER_WAVE + 1):
+        print(f"[*] {user_name}: Попытка {attempt} из {MAX_RETRIES_PER_WAVE}...")
         sub_page_url, happ_link, screen, err, email = get_trial_in_incognito(browser)
         last_result = (sub_page_url, happ_link, screen, err, email)
         if sub_page_url or happ_link:
             return last_result
-        print(f"[-] Попытка {attempt} не дала ссылку. Ждём 5 секунд...")
-        time.sleep(5)
+        wait_sec = 15 * attempt
+        print(f"[-] Попытка {attempt} не дала ссылку. Ждём {wait_sec} сек...")
+        time.sleep(wait_sec)
     return last_result
 
 def send_to_telegram(chat_id, sub_page_url, happ_link):
@@ -339,45 +358,72 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
             ]
         }
 
-    for _ in range(3):
+    for _ in range(4):
         try:
             resp = requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload, timeout=15)
             if resp.status_code == 200:
-                break
+                return True
         except Exception as e:
             print(f"[-] Ошибка отправки в Telegram: {e}")
-            time.sleep(2)
+        time.sleep(3)
+    return False
 
 def main():
     if not TG_BOT_TOKEN:
         print("[-] КРИТИЧЕСКАЯ ОШИБКА: Секрет TG_BOT_TOKEN не задан!")
         raise SystemExit(1)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        for idx, user in enumerate(USERS):
-            chat_id = user["chat_id"]
-            if not chat_id:
-                continue
+    active_users = [u for u in USERS if u.get("chat_id")]
+    failed_users = []
+    success_count = 0
 
+    with sync_playwright() as p:
+        # ВОЛНА 1: Основной проход по всем пользователям
+        browser = p.chromium.launch(headless=True)
+        for user in active_users:
             sub_page_url, happ_link, screen, err, email = get_trial_with_retries(browser, user["name"])
             if sub_page_url or happ_link:
                 print(f"[+] Успешно для {user['name']}! Страница: {sub_page_url} | Happ: {happ_link}")
-                send_to_telegram(chat_id, sub_page_url, happ_link)
+                send_to_telegram(user["chat_id"], sub_page_url, happ_link)
+                success_count += 1
             else:
+                print(f"[-] {user['name']} отложен на повторную волну через 2 минуты.")
+                failed_users.append((user, screen, err, email))
+            time.sleep(4)
+        browser.close()
+
+        # ВОЛНА 2: Если у кого-то случился сбой — ждём 2 минуты и пробуем ещё раз в новом браузере
+        if failed_users:
+            print(f"\n[*] Ждём 120 секунд (2 минуты) перед повторной попыткой для {len(failed_users)} чел...")
+            time.sleep(120)
+            browser = p.chromium.launch(headless=True)
+            still_failed = []
+
+            for user, _, _, _ in failed_users:
+                sub_page_url, happ_link, screen, err, email = get_trial_with_retries(browser, f"{user['name']} (Волна 2)")
+                if sub_page_url or happ_link:
+                    print(f"[+] Успешно со 2-й волны для {user['name']}!")
+                    send_to_telegram(user["chat_id"], sub_page_url, happ_link)
+                    success_count += 1
+                else:
+                    still_failed.append((user, screen, err, email))
+                time.sleep(4)
+            browser.close()
+
+            # Если даже после паузы в 2 минуты и 6 попыток кто-то не получил ссылку — пишем ТОЛЬКО админу
+            for user, screen, err, email in still_failed:
                 caption = (
-                    f"⚠️ Не удалось получить ссылку для «{user['name']}» после {MAX_RETRIES} попыток (почта {email}).\n"
+                    f"⚠️ Не удалось получить ссылку для «{user['name']}» после 2 волн по {MAX_RETRIES_PER_WAVE} попытки (почта {email}).\n"
                     f"Друзьям ничего не отправлено.\n"
                     f"Детали: {err or 'Ссылка не найдена'}"
                 )
                 send_admin_debug(screen, caption)
-                if idx == 0:
-                    print("[-] Остановка цикла, так как первая генерация не удалась.")
-                    browser.close()
-                    raise SystemExit(1)
 
-            time.sleep(3)
-        browser.close()
+    # Если вообще ни одна ссылка не сгенерировалась (например, сайт лежал) —
+    # выходим с кодом ошибки 1, чтобы last_run.txt НЕ обновлялся и через 20 минут скрипт запустился снова!
+    if active_users and success_count == 0:
+        print("[-] Ни одна ссылка не была получена. Таймер 71ч не сбрасываем, повтор через 20 минут.")
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     main()
