@@ -368,12 +368,51 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
         time.sleep(3)
     return False
 
+def send_users_list_to_admin():
+    """Узнаёт у Telegram реальные имена и @username всех CHAT_ID и присылает список админу"""
+    lines = ["📋 <b>Кто под каким номером записан в GitHub:</b>\n"]
+    for idx, user in enumerate(USERS, start=1):
+        cid = user.get("chat_id")
+        if not cid:
+            lines.append(f"<b>{idx} (CHAT_ID_{idx}):</b> ❌ <i>не задан</i>")
+            continue
+        try:
+            r = requests.get(
+                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getChat",
+                params={"chat_id": cid},
+                timeout=10
+            ).json()
+            if r.get("ok"):
+                chat = r["result"]
+                first_name = chat.get("first_name", "")
+                last_name = chat.get("last_name", "")
+                full_name = f"{first_name} {last_name}".strip()
+                username = f"@{chat['username']}" if chat.get("username") else "без юзернейма"
+                lines.append(f"<b>{idx} (CHAT_ID_{idx}):</b> {full_name} ({username}) — <code>{cid}</code>")
+            else:
+                lines.append(f"<b>{idx} (CHAT_ID_{idx}):</b> ID <code>{cid}</code> (не нажал /start у бота)")
+        except Exception as e:
+            lines.append(f"<b>{idx} (CHAT_ID_{idx}):</b> ID <code>{cid}</code> (ошибка: {e})")
+
+    requests.post(
+        f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+        json={"chat_id": ADMIN_CHAT_ID, "text": "\n".join(lines), "parse_mode": "HTML"},
+        timeout=15
+    )
+
 def main():
     if not TG_BOT_TOKEN:
         print("[-] КРИТИЧЕСКАЯ ОШИБКА: Секрет TG_BOT_TOKEN не задан!")
         raise SystemExit(1)
 
     target_input = os.environ.get("TARGET_USER", "").strip()
+
+    # Если выбрана опция "0 — Прислать мне список"
+    if target_input.startswith("0"):
+        print("[*] Отправляем список пользователей админу...")
+        send_users_list_to_admin()
+        return
+
     if target_input and target_input[0] in ("1", "2", "3", "4", "5"):
         idx = int(target_input[0]) - 1
         selected_user = USERS[idx]
