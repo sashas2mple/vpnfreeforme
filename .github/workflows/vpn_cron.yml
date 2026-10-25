@@ -2,7 +2,8 @@ name: Auto Trial VPN (Every 71 Hours)
 
 on:
   schedule:
-    - cron: '12,32,52 * * * *'
+    # Проверяет таймер и нажатия кнопок в Telegram каждые 15 минут
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
     inputs:
       target_user:
@@ -29,41 +30,21 @@ jobs:
       - name: Скачиваем код
         uses: actions/checkout@v4
 
-      - name: Проверяем, прошёл ли 71 час с прошлой отправки
+      - name: Проверяем таймер 71ч и нажатия кнопки «Прислать новую» в Telegram
         id: check_time
-        run: |
-          NOW=$(date +%s)
-          echo "run_start=$NOW" >> $GITHUB_OUTPUT
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          CHAT_ID_1: ${{ secrets.CHAT_ID_1 }}
+          CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
+          CHAT_ID_3: ${{ secrets.CHAT_ID_3 }}
+          CHAT_ID_4: ${{ secrets.CHAT_ID_4 }}
+          CHAT_ID_5: ${{ secrets.CHAT_ID_5 }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_TARGET: ${{ github.event.inputs.target_user }}
+        run: python3 auto_trial.py --check-only
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Ручной запуск — старт!"
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          if [ ! -f last_run.txt ]; then
-            echo "Файл last_run.txt не найден — первый запуск!"
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          LAST_RUN=$(cat last_run.txt | tr -d '[:space:]')
-          DIFF=$((NOW - LAST_RUN))
-          # 252600 секунд = 70 ч. 10 мин. (с учётом очереди GitHub придёт ровно к ~71 ч.)
-          if [ "$DIFF" -ge 252600 ]; then
-            echo "Прошло $((DIFF / 3600)) ч. $(((DIFF % 3600) / 60)) мин. — пора запускать!"
-            echo "should_run=true" >> $GITHUB_OUTPUT
-          else
-            echo "Прошло $((DIFF / 3600)) ч. $(((DIFF % 3600) / 60)) мин. из 71 ч. — ждём."
-            echo "should_run=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Устанавливаем Python
-        if: steps.check_time.outputs.should_run == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Устанавливаем библиотеки и браузер
-        if: steps.check_time.outputs.should_run == 'true'
+      - name: Устанавливаем Python и браузер (только если нужна генерация ссылок)
+        if: steps.check_time.outputs.need_browser == 'true'
         run: |
           pip install requests playwright
           playwright install --with-deps chromium
@@ -77,16 +58,19 @@ jobs:
           CHAT_ID_3: ${{ secrets.CHAT_ID_3 }}
           CHAT_ID_4: ${{ secrets.CHAT_ID_4 }}
           CHAT_ID_5: ${{ secrets.CHAT_ID_5 }}
-          TARGET_USER: ${{ github.event.inputs.target_user }}
-        run: python auto_trial.py
+          RUN_MODE: ${{ steps.check_time.outputs.run_mode }}
+          TARGET_IDS: ${{ steps.check_time.outputs.target_ids }}
+        run: python3 auto_trial.py
 
-      - name: Запоминаем точное время старта (только при общем запуске)
-        if: steps.check_time.outputs.should_run == 'true' && (github.event_name == 'schedule' || github.event.inputs.target_user == 'Всем (обычный запуск со сбросом таймера)')
+      - name: Сохраняем состояние таймера и обработанных кнопок
+        if: steps.check_time.outputs.state_changed == 'true' || steps.check_time.outputs.reset_timer == 'true'
         run: |
-          echo "${{ steps.check_time.outputs.run_start }}" > last_run.txt
+          if [ "${{ steps.check_time.outputs.reset_timer }}" = "true" ]; then
+            echo "${{ steps.check_time.outputs.run_start }}" > last_run.txt
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_run.txt
-          git diff --staged --quiet || git commit -m "Update last_run timestamp (71h timer)"
+          git add last_run.txt tg_state.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Update VPN bot state & timer"
           git pull --rebase origin main || true
           git push
