@@ -386,7 +386,7 @@ def extract_and_validate_sub_page(page):
         happ_tab = page.get_by_text("Happ", exact=True).first
         if happ_tab.count() > 0 and happ_tab.is_visible():
             happ_tab.click()
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(3000)
 
         add_btn = page.locator('a:has-text("Добавить подписку"), button:has-text("Добавить подписку")').first
         if add_btn.count() > 0 and add_btn.is_visible():
@@ -493,7 +493,7 @@ def get_trial_in_incognito(browser):
         if not clicked_submit:
             email_input.press("Enter")
 
-        page.wait_for_timeout(6000)
+        page.wait_for_timeout(30000)
 
         after_links = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
         new_links = [
@@ -513,7 +513,7 @@ def get_trial_in_incognito(browser):
                 happ_link = target
             else:
                 page.goto(target, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(10000)
                 sub_page_url, happ_link = extract_and_validate_sub_page(page)
         else:
             print("[*] Проверяем письмо на почте...")
@@ -524,7 +524,7 @@ def get_trial_in_incognito(browser):
                     happ_link = link
                     break
                 page.goto(link, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(10000)
                 sub_page_url, happ_link = extract_and_validate_sub_page(page)
                 if sub_page_url or happ_link:
                     break
