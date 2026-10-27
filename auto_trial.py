@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import html
 import json
 import time
 import random
@@ -15,8 +16,9 @@ TRIAL_URL = "https://power-vps.pro/free-trial/"
 REDIRECT_BASE_URL = "https://sashas2mple.github.io/vpnfreeforme/"
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 MAX_RETRIES_PER_WAVE = 3
-TIMER_INTERVAL_SEC = 252600  # 70 ч. 10 мин. (с учётом очереди GitHub выходит ровно ~71 ч.)
-BUTTON_COOLDOWN_SEC = 3600   # Защита от спама кнопкой: не чаще 1 раза в час для одного человека
+TIMER_INTERVAL_SEC = 252600   # 70 ч. 10 мин. (с учётом очереди GitHub выходит ровно ~71 ч.)
+DISPLAY_INTERVAL_SEC = 255600 # 71 ч. для отображения в /status
+BUTTON_COOLDOWN_SEC = 3600    # Защита от спама кнопкой: не чаще 1 раза в час для одного человека
 STATE_FILE = "tg_state.json"
 LAST_RUN_FILE = "last_run.txt"
 
@@ -81,10 +83,41 @@ def write_github_output(key, value):
 
 
 def run_precheck():
-    """Проверяет таймер 71ч и нажатия кнопок в Telegram за 1 секунду без установки браузера"""
+    """Проверяет ручной запуск, таймер 71ч и нажатия кнопок в Telegram без установки браузера"""
     now = int(time.time())
     write_github_output("run_start", str(now))
 
+    # 1. Сначала проверяем ручной запуск с GitHub (чтобы не проглотить апдейты TG при ручном запуске)
+    event_name = os.environ.get("EVENT_NAME", "")
+    manual_target = os.environ.get("MANUAL_TARGET", "").strip()
+
+    if event_name == "workflow_dispatch":
+        write_github_output("state_changed", "false")
+        if manual_target.startswith("0"):
+            write_github_output("should_run", "true")
+            write_github_output("need_browser", "false")
+            write_github_output("run_mode", "list_users")
+            write_github_output("target_ids", "")
+            write_github_output("reset_timer", "false")
+            return
+        elif manual_target and manual_target[0] in ("1", "2", "3", "4", "5"):
+            idx = int(manual_target[0]) - 1
+            cid = str(USERS[idx].get("chat_id") or "").strip()
+            write_github_output("should_run", "true")
+            write_github_output("need_browser", "true")
+            write_github_output("run_mode", "single")
+            write_github_output("target_ids", cid)
+            write_github_output("reset_timer", "false")
+            return
+        else:
+            write_github_output("should_run", "true")
+            write_github_output("need_browser", "true")
+            write_github_output("run_mode", "full")
+            write_github_output("target_ids", "")
+            write_github_output("reset_timer", "true")
+            return
+
+    # 2. Проверяем новые нажатия кнопок и команды в Telegram-боте
     allowed_ids = {str(u["chat_id"]).strip() for u in USERS if u.get("chat_id")}
     state = load_json_state()
     last_update_id = state.get("last_update_id", 0)
@@ -92,7 +125,6 @@ def run_precheck():
     state_changed = False
     reissue_chat_ids = []
 
-    # 1. Проверяем новые нажатия кнопок и команды в Telegram-боте
     updates_resp = tg_api_call("getUpdates", {"offset": last_update_id + 1, "timeout": 1})
     for upd in updates_resp.get("result", []):
         uid = upd["update_id"]
@@ -118,6 +150,7 @@ def run_precheck():
                     })
                 else:
                     cooldowns[chat_id] = now
+                    state_changed = True
                     if chat_id not in reissue_chat_ids:
                         reissue_chat_ids.append(chat_id)
                     tg_api_call("answerCallbackQuery", {
@@ -140,12 +173,16 @@ def run_precheck():
         if chat_id in allowed_ids:
             if text.startswith("/status") or text == "статус":
                 last_run = get_last_run_time()
-                rem_sec = max(0, (last_run + 255600) - now)
+                rem_sec = max(0, (last_run + DISPLAY_INTERVAL_SEC) - now)
                 rem_h = rem_sec // 3600
                 rem_m = (rem_sec % 3600) // 60
                 tg_api_call("sendMessage", {
                     "chat_id": chat_id,
-                    "text": f"📊 <b>Статус авто-рассылки VPN:</b>\nДо следующей плановой выдачи осталось: <b>{rem_h} ч. {rem_m} мин.</b>\n\nЕсли текущая ссылка не работает, нажми кнопку под последним сообщением или отправь /new.",
+                    "text": (
+                        f"📊 <b>Статус авто-рассылки VPN:</b>\n"
+                        f"До следующей плановой выдачи осталось: <b>{rem_h} ч. {rem_m} мин.</b>\n\n"
+                        f"Если текущая ссылка не работает, нажми кнопку под последним сообщением или отправь /new."
+                    ),
                     "parse_mode": "HTML"
                 })
             elif text.startswith("/new") or text == "новая":
@@ -158,6 +195,7 @@ def run_precheck():
                     })
                 else:
                     cooldowns[chat_id] = now
+                    state_changed = True
                     if chat_id not in reissue_chat_ids:
                         reissue_chat_ids.append(chat_id)
                     tg_api_call("sendMessage", {
@@ -172,35 +210,6 @@ def run_precheck():
         save_json_state(state)
 
     write_github_output("state_changed", "true" if state_changed else "false")
-
-    # 2. Проверяем ручной запуск с GitHub
-    event_name = os.environ.get("EVENT_NAME", "")
-    manual_target = os.environ.get("MANUAL_TARGET", "").strip()
-
-    if event_name == "workflow_dispatch":
-        if manual_target.startswith("0"):
-            write_github_output("should_run", "true")
-            write_github_output("need_browser", "false")
-            write_github_output("run_mode", "list_users")
-            write_github_output("target_ids", "")
-            write_github_output("reset_timer", "false")
-            return
-        elif manual_target and manual_target[0] in ("1", "2", "3", "4", "5"):
-            idx = int(manual_target[0]) - 1
-            cid = str(USERS[idx].get("chat_id") or "").strip()
-            write_github_output("should_run", "true")
-            write_github_output("need_browser", "true")
-            write_github_output("run_mode", "single")
-            write_github_output("target_ids", cid)
-            write_github_output("reset_timer", "false")
-            return
-        else:
-            write_github_output("should_run", "true")
-            write_github_output("need_browser", "true")
-            write_github_output("run_mode", "full")
-            write_github_output("target_ids", "")
-            write_github_output("reset_timer", "true")
-            return
 
     # 3. Проверяем 71-часовой таймер
     last_run = get_last_run_time()
@@ -276,24 +285,48 @@ def create_temp_email():
     raise RuntimeError("Не удалось создать временную почту ни на mail.tm, ни на mail.gw")
 
 
+def is_junk_link(url):
+    """Отсеивает ссылки на соцсети, картинки, стили и саму стартовую страницу триала"""
+    u = url.lower().strip()
+    if u.rstrip("/") == TRIAL_URL.rstrip("/") or u.rstrip("/") == "https://power-vps.pro":
+        return True
+    junk_markers = [
+        ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".css", ".js", ".woff", ".ico",
+        "w3.org", "schema.org", "googleapis.com", "gstatic.com",
+        "t.me/", "telegram.me", "telegram.org", "vk.com", "youtube.com",
+        "mailto:", "javascript:", "privacy", "policy", "oferta", "terms"
+    ]
+    return any(m in u for m in junk_markers)
+
+
 def wait_for_email_link(api_base, token, timeout=60):
     import requests
     headers = {"Authorization": f"Bearer {token}"}
     start = time.time()
     while time.time() - start < timeout:
         try:
-            msgs = requests.get(f"{api_base}/messages", headers=headers, timeout=15).json().get("hydra:member", [])
+            msgs_resp = requests.get(f"{api_base}/messages", headers=headers, timeout=15)
+            msgs = msgs_resp.json().get("hydra:member", []) if msgs_resp.status_code == 200 else []
             if msgs:
-                msg_id = msgs[0]["id"]
-                msg = requests.get(f"{api_base}/messages/{msg_id}", headers=headers, timeout=15).json()
-                text = msg.get("text", "") or str(msg.get("html", ""))
-                links = re.findall(r'(https?://[^\s"\'<>]+|happ://[^\s"\'<>]+)', text)
-                valid_links = [
-                    l for l in links
-                    if not any(ext in l.lower() for ext in [".png", ".jpg", ".jpeg", ".svg", ".css", ".js", "w3.org"])
-                ]
-                if valid_links:
-                    return valid_links
+                for m in msgs:
+                    msg_id = m["id"]
+                    msg = requests.get(f"{api_base}/messages/{msg_id}", headers=headers, timeout=15).json()
+                    text_part = str(msg.get("text") or "")
+                    html_raw = msg.get("html") or ""
+                    html_part = " ".join(html_raw) if isinstance(html_raw, list) else str(html_raw)
+
+                    # Объединяем и text, и html (чтобы не терять ссылки в HTML-кнопках) и декодируем &amp;
+                    combined = html.unescape(f"{text_part}\n{html_part}")
+                    links = re.findall(r'(https?://[^\s"\'<>]+|happ://[^\s"\'<>]+)', combined)
+
+                    valid_links = []
+                    for l in links:
+                        clean_l = l.rstrip(").,;\"'")
+                        if not is_junk_link(clean_l) and clean_l not in valid_links:
+                            valid_links.append(clean_l)
+
+                    if valid_links:
+                        return valid_links
         except Exception as e:
             print(f"[-] Ошибка при проверке почты: {e}")
         time.sleep(3)
@@ -377,7 +410,7 @@ def open_email_form(page):
 
 
 def extract_and_validate_sub_page(page):
-    """Извлекает ссылки и ПРОВЕРЯЕТ, что страница подписки реально рабочая, а не пустая/битая"""
+    """Извлекает ссылки и проверяет страницу подписки (поддерживает и русский, и английский интерфейс)"""
     page_url = page.url
     happ_deeplink = None
     has_add_button = False
@@ -385,46 +418,78 @@ def extract_and_validate_sub_page(page):
     try:
         happ_tab = page.get_by_text("Happ", exact=True).first
         if happ_tab.count() > 0 and happ_tab.is_visible():
-            happ_tab.click()
-            page.wait_for_timeout(3000)
+            happ_tab.click(timeout=3000)
+            page.wait_for_timeout(1500)
+    except Exception:
+        pass
 
-        add_btn = page.locator('a:has-text("Добавить подписку"), button:has-text("Добавить подписку")').first
+    # Ищем кнопку как на русском («Добавить подписку»), так и на английском («Add Subscription»)
+    btn_selectors = (
+        'a:has-text("Добавить подписку"), button:has-text("Добавить подписку"), '
+        'a:has-text("Add Subscription"), button:has-text("Add Subscription")'
+    )
+    try:
+        add_btn = page.locator(btn_selectors).first
         if add_btn.count() > 0 and add_btn.is_visible():
             has_add_button = True
             href = add_btn.get_attribute("href")
-            if href:
+            if href and (href.startswith("happ://") or href.startswith("v2raytun://") or href.startswith("http")):
                 happ_deeplink = href
     except Exception:
         pass
 
-    content = page.content()
-    if not happ_deeplink:
+    content = ""
+    try:
+        content = page.content()
+    except Exception:
+        pass
+
+    if not happ_deeplink and content:
         found_happ = re.findall(r'(happ://[^\s"\'<>]+)', content)
         if found_happ:
-            happ_deeplink = found_happ[0]
+            happ_deeplink = html.unescape(found_happ[0])
 
-    # Валидация: страница считается рабочей только если на ней есть happ:// ссылка,
-    # кнопка «Добавить подписку» или URL явно ведёт на панель подписки (и это не стартовая страница триала)
+    # Проверяем признаки реальной страницы подписки (RU + EN маркеры со скриншота)
+    sub_markers = [
+        "Добавить подписку",
+        "Add Subscription",
+        "SUB_",
+        "Персональный",
+        "BANDWIDTH",
+        "Installation",
+        "Установка",
+    ]
+    has_sub_markers = any(m in content for m in sub_markers)
+    is_not_trial_page = page_url.rstrip("/") != TRIAL_URL.rstrip("/")
+
     is_valid = bool(
         happ_deeplink
         or has_add_button
-        or (page_url != TRIAL_URL and ("/sub" in page_url or "Установка" in content))
+        or (is_not_trial_page and ("/sub" in page_url or has_sub_markers))
     )
 
     if not is_valid:
         return None, None
+
+    # Если страница подписки валидна, но кнопка работает через JS без прямого happ:// в HTML —
+    # формируем прямую ссылку для Happ из адреса самой страницы подписки
+    if not happ_deeplink and page_url.startswith("http") and is_not_trial_page:
+        happ_deeplink = f"happ://add/{page_url}"
+
     return page_url, happ_deeplink
 
 
-def get_trial_in_incognito(browser):
+def get_trial_in_incognito(browser, screenshot_path="debug_screen.png"):
     sub_page_url = None
     happ_link = None
     error_text = None
     email = "не создана"
-    screenshot_path = "debug_screen.png"
+    new_links = []
+    email_links = []
 
     context = browser.new_context(
         viewport={"width": 1280, "height": 900},
+        locale="ru-RU",
         user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     )
     page = context.new_page()
@@ -442,12 +507,10 @@ def get_trial_in_incognito(browser):
         if not email_input:
             raise RuntimeError("После нажатия кнопок поле ввода почты не появилось")
 
-        text_inputs = target_frame.locator(
-            'input[type="text"], input[name*="name" i], input[placeholder*="имя" i], '
-            'input:not([type]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])'
-        )
-        for i in range(text_inputs.count()):
-            inp = text_inputs.nth(i)
+        # Заполняем только поля имени (не трогая посторонние input на странице)
+        name_inputs = target_frame.locator('input[name*="name" i], input[placeholder*="имя" i], input[placeholder*="name" i]')
+        for i in range(name_inputs.count()):
+            inp = name_inputs.nth(i)
             if inp.is_visible():
                 try:
                     inp.fill("Alex")
@@ -493,41 +556,63 @@ def get_trial_in_incognito(browser):
         if not clicked_submit:
             email_input.press("Enter")
 
-        page.wait_for_timeout(30000)
-
-        after_links = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-        new_links = [
-            l for l in after_links
-            if l not in before_links
-            and not l.startswith("javascript:")
-            and not l.startswith("mailto:")
-            and not l.endswith("#")
-        ]
-
-        if page.locator('text="Добавить подписку"').count() > 0 or page.url != TRIAL_URL:
+        # КАСКАД 1: Ждём до 25 секунд появления страницы подписки (проверяем каждые 2 сек)
+        for _ in range(13):
+            page.wait_for_timeout(2000)
             sub_page_url, happ_link = extract_and_validate_sub_page(page)
-        elif new_links:
-            target = new_links[0]
-            print(f"[+] Найдена новая ссылка на странице: {target}")
-            if target.startswith("happ://"):
-                happ_link = target
-            else:
-                page.goto(target, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(10000)
-                sub_page_url, happ_link = extract_and_validate_sub_page(page)
-        else:
+            if sub_page_url or happ_link:
+                print(f"[+] Страница подписки открылась сразу после редиректа: {sub_page_url}")
+                break
+
+        # КАСКАД 2: Если редиректа не произошло, проверяем новые ссылки, появившиеся на странице
+        if not (sub_page_url or happ_link):
+            after_links = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+            new_links = [
+                l for l in after_links
+                if l not in before_links and not is_junk_link(l) and not l.endswith("#")
+            ]
+            for target in new_links:
+                print(f"[+] Проверяем новую ссылку со страницы: {target}")
+                if target.startswith("happ://"):
+                    happ_link = target
+                    break
+                try:
+                    page.goto(target, wait_until="domcontentloaded", timeout=25000)
+                    page.wait_for_timeout(5000)
+                    sub_page_url, happ_link = extract_and_validate_sub_page(page)
+                    if sub_page_url or happ_link:
+                        break
+                except Exception as nav_err:
+                    print(f"[-] Не удалось открыть ссылку со страницы ({target}): {nav_err}")
+
+        # КАСКАД 3: Если ни страница, ни новые ссылки не дали результат — ВСЕГДА проверяем почту
+        if not (sub_page_url or happ_link):
             print("[*] Проверяем письмо на почте...")
             email_links = wait_for_email_link(api_base, token, timeout=60)
             for link in email_links:
-                print(f"[+] Ссылка из письма: {link}")
+                print(f"[+] Найдена ссылка в письме: {link}")
                 if link.startswith("happ://"):
                     happ_link = link
                     break
-                page.goto(link, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(10000)
-                sub_page_url, happ_link = extract_and_validate_sub_page(page)
-                if sub_page_url or happ_link:
-                    break
+                try:
+                    page.goto(link, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(6000)
+                    sub_page_url, happ_link = extract_and_validate_sub_page(page)
+                    if sub_page_url or happ_link:
+                        break
+                except Exception as nav_err:
+                    print(f"[-] Ссылка из письма ({link}) не загрузилась в браузере: {nav_err}")
+                    # Если сама ссылка из письма ведёт на панель подписки, но браузер поймал таймаут — сохраняем её напрямую
+                    if "/sub" in link or "sub." in link:
+                        sub_page_url = link
+                        happ_link = f"happ://add/{link}"
+                        break
+
+        if not (sub_page_url or happ_link) and not error_text:
+            error_text = (
+                f"Валидация не прошла. Финальный URL: {page.url} | "
+                f"Новых ссылок на странице: {len(new_links)} | Ссылок в письме: {len(email_links)}"
+            )
 
         page.screenshot(path=screenshot_path, full_page=True)
     except Exception as e:
@@ -544,15 +629,18 @@ def get_trial_in_incognito(browser):
 
 
 def get_trial_with_retries(browser, user_name):
-    last_result = (None, None, "debug_screen.png", "Неизвестная ошибка", "не создана")
+    safe_tag = re.sub(r'[^a-zA-Z0-9]', '_', user_name)
+    screen_name = f"debug_{safe_tag}.png"
+    last_result = (None, None, screen_name, "Неизвестная ошибка", "не создана")
+
     for attempt in range(1, MAX_RETRIES_PER_WAVE + 1):
         print(f"[*] {user_name}: Попытка {attempt} из {MAX_RETRIES_PER_WAVE}...")
-        sub_page_url, happ_link, screen, err, email = get_trial_in_incognito(browser)
+        sub_page_url, happ_link, screen, err, email = get_trial_in_incognito(browser, screenshot_path=screen_name)
         last_result = (sub_page_url, happ_link, screen, err, email)
         if sub_page_url or happ_link:
             return last_result
         wait_sec = 15 * attempt
-        print(f"[-] Попытка {attempt} не дала валидную ссылку. Ждём {wait_sec} сек...")
+        print(f"[-] Попытка {attempt} не дала валидную ссылку ({err}). Ждём {wait_sec} сек...")
         time.sleep(wait_sec)
     return last_result
 
@@ -563,6 +651,9 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
     now_msk = datetime.now(msk_tz)
     exp_msk = now_msk + timedelta(hours=72)
     next_msk = now_msk + timedelta(hours=71)
+
+    if not happ_link and sub_page_url and sub_page_url.startswith("http"):
+        happ_link = f"happ://add/{sub_page_url}"
 
     text_lines = ["🔥 <b>Твоя новая подписка VPN на 3 дня готова!</b>\n"]
     if sub_page_url and sub_page_url.startswith("http"):
@@ -578,7 +669,6 @@ def send_to_telegram(chat_id, sub_page_url, happ_link):
         "2. Если ссылка вдруг не открывается — нажми кнопку <b>«🔄 Не работает? Прислать новую»</b> (бот пришлёт замену лично тебе)."
     )
 
-    # Формируем кнопки: 1-й ряд — быстрый импорт и веб-страница, 2-й ряд — запрос новой ссылки
     keyboard = []
     first_row = []
 
