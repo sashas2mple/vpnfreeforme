@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 
 MAIL_APIS = ["https://api.mail.tm", "https://api.mail.gw"]
 TRIAL_URL = "https://power-vps.pro/free-trial/"
-# Твоя страница быстрого редиректа в Happ (из index.html в репозитории)
 REDIRECT_BASE_URL = "https://sashas2mple.github.io/vpnfreeforme/"
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 MAX_RETRIES_PER_WAVE = 3
@@ -87,7 +86,7 @@ def run_precheck():
     now = int(time.time())
     write_github_output("run_start", str(now))
 
-    # 1. Сначала проверяем ручной запуск с GitHub (чтобы не проглотить апдейты TG при ручном запуске)
+    # 1. Проверяем ручной запуск с GitHub
     event_name = os.environ.get("EVENT_NAME", "")
     manual_target = os.environ.get("MANUAL_TARGET", "").strip()
 
@@ -132,7 +131,6 @@ def run_precheck():
             last_update_id = uid
             state_changed = True
 
-        # Обработка нажатия инлайн-кнопки «🔄 Не работает? Прислать новую»
         cb = upd.get("callback_query")
         if cb:
             cb_id = cb["id"]
@@ -165,7 +163,6 @@ def run_precheck():
                     })
             continue
 
-        # Обработка текстовых команд (/new и /status)
         msg = upd.get("message", {})
         chat_id = str(msg.get("chat", {}).get("id", "")).strip()
         text = (msg.get("text") or "").strip().lower()
@@ -223,7 +220,7 @@ def run_precheck():
         write_github_output("reset_timer", "true")
         return
 
-    # 4. Если общий таймер ещё не подошёл, но кто-то нажал кнопку «Прислать новую» в Telegram
+    # 4. Если общий таймер ещё не подошёл, но кто-то нажал кнопку «Прислать новую»
     if reissue_chat_ids:
         print(f"[+] Запрос новой ссылки через кнопку TG для ID: {reissue_chat_ids}")
         write_github_output("should_run", "true")
@@ -286,15 +283,20 @@ def create_temp_email():
 
 
 def is_junk_link(url):
-    """Отсеивает ссылки на соцсети, картинки, стили и саму стартовую страницу триала"""
+    """Отсеивает ссылки на соцсети, картинки, стили и стартовые страницы обоих доменов (power-vps.pro / power-vp.pro)"""
     u = url.lower().strip()
-    if u.rstrip("/") == TRIAL_URL.rstrip("/") or u.rstrip("/") == "https://power-vps.pro":
+    if not u or u.endswith("#"):
+        return True
+    for base in ("https://power-vps.pro", "https://power-vp.pro", "https://power-vpn.ru", "http://power-vps.pro", "http://power-vp.pro"):
+        if u.rstrip("/") in (base, f"{base}/free-trial"):
+            return True
+    if "/free-trial" in u:
         return True
     junk_markers = [
         ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".css", ".js", ".woff", ".ico",
         "w3.org", "schema.org", "googleapis.com", "gstatic.com",
         "t.me/", "telegram.me", "telegram.org", "vk.com", "youtube.com",
-        "mailto:", "javascript:", "privacy", "policy", "oferta", "terms"
+        "mailto:", "javascript:", "privacy", "policy", "oferta", "terms", "agreement"
     ]
     return any(m in u for m in junk_markers)
 
@@ -315,7 +317,6 @@ def wait_for_email_link(api_base, token, timeout=60):
                     html_raw = msg.get("html") or ""
                     html_part = " ".join(html_raw) if isinstance(html_raw, list) else str(html_raw)
 
-                    # Объединяем и text, и html (чтобы не терять ссылки в HTML-кнопках) и декодируем &amp;
                     combined = html.unescape(f"{text_part}\n{html_part}")
                     links = re.findall(r'(https?://[^\s"\'<>]+|happ://[^\s"\'<>]+)', combined)
 
@@ -326,6 +327,10 @@ def wait_for_email_link(api_base, token, timeout=60):
                             valid_links.append(clean_l)
 
                     if valid_links:
+                        # Приоритет ссылкам, содержащим happ://, sub, vpn, key, token
+                        valid_links.sort(
+                            key=lambda x: 0 if any(k in x.lower() for k in ("happ://", "sub", "vpn", "key", "token")) else 1
+                        )
                         return valid_links
         except Exception as e:
             print(f"[-] Ошибка при проверке почты: {e}")
@@ -357,17 +362,18 @@ def send_admin_debug(photo_path, caption):
 
 
 def find_email_input(page):
-    selectors = [
+    """Находит именно поле E-mail (сначала по явным признакам почты, и только потом среди общих полей)"""
+    specific_selectors = [
+        'xpath=//*[contains(normalize-space(text()), "E-mail") or contains(normalize-space(text()), "почт")]/following::input[1]',
         'input[type="email"]',
         'input[name*="mail" i]',
         'input[placeholder*="mail" i]',
         'input[placeholder*="почт" i]',
         'input[placeholder*="@" i]',
-        'input[type="text"]',
-        'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])'
     ]
-    for frame in [page.main_frame] + [f for f in page.frames if f != page.main_frame]:
-        for sel in selectors:
+    frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+    for frame in frames:
+        for sel in specific_selectors:
             try:
                 loc = frame.locator(sel)
                 for i in range(loc.count()):
@@ -376,6 +382,17 @@ def find_email_input(page):
                         return el, frame
             except Exception:
                 pass
+
+    # Резервный поиск: если оба поля (Ваше имя и E-mail) обычные текстовые — берём последнее видимое поле в форме
+    fallback_sel = 'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])'
+    for frame in frames:
+        try:
+            loc = frame.locator(fallback_sel)
+            visible_els = [loc.nth(i) for i in range(loc.count()) if loc.nth(i).is_visible()]
+            if visible_els:
+                return visible_els[-1], frame
+        except Exception:
+            pass
     return None, None
 
 
@@ -409,25 +426,142 @@ def open_email_form(page):
     return None, None
 
 
-def extract_and_validate_sub_page(page):
-    """Извлекает ссылки и проверяет страницу подписки (поддерживает и русский, и английский интерфейс)"""
-    page_url = page.url
-    happ_deeplink = None
-    has_add_button = False
-
+def fill_form_fields(page, target_frame, email_input, email, use_sequential=False):
+    """
+    Гарантированно заполняет обязательное поле «Ваше имя» и поле «Ваш E-mail» в модальном окне.
+    """
+    # 1. Ищем все текстовые поля внутри формы/модального окна и заполняем именем "Alex"
+    all_text_selector = (
+        'input[type="text"], input:not([type]), '
+        'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="email"])'
+    )
     try:
-        happ_tab = page.get_by_text("Happ", exact=True).first
-        if happ_tab.count() > 0 and happ_tab.is_visible():
-            happ_tab.click(timeout=3000)
-            page.wait_for_timeout(1500)
+        inputs = target_frame.locator(all_text_selector)
+        for i in range(inputs.count()):
+            inp = inputs.nth(i)
+            if inp.is_visible():
+                try:
+                    inp.click(timeout=2000)
+                    if use_sequential:
+                        inp.fill("")
+                        inp.press_sequentially("Alex", delay=40)
+                    else:
+                        inp.fill("Alex")
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    # Ищем кнопку как на русском («Добавить подписку»), так и на английском («Add Subscription»)
+    # 2. Дополнительно прицельно ищем поле прямо под надписью «Ваше имя»
+    name_xpath_selectors = [
+        'xpath=//*[contains(normalize-space(text()), "Ваше имя")]/following::input[1]',
+        'xpath=//label[contains(normalize-space(.), "Ваше имя")]/following::input[1]',
+        'input[name*="name" i], input[placeholder*="имя" i], input[placeholder*="name" i]',
+    ]
+    for sel in name_xpath_selectors:
+        try:
+            loc = target_frame.locator(sel)
+            for i in range(loc.count()):
+                inp = loc.nth(i)
+                if inp.is_visible():
+                    inp.click(timeout=2000)
+                    if use_sequential:
+                        inp.fill("")
+                        inp.press_sequentially("Alex", delay=40)
+                    else:
+                        inp.fill("Alex")
+        except Exception:
+            pass
+
+    page.wait_for_timeout(300)
+
+    # 3. Заполняем поле E-mail (перезаписывает почту, если на шаге 1 туда тоже попало "Alex")
+    email_input.click(timeout=2000)
+    if use_sequential:
+        email_input.fill("")
+        email_input.press_sequentially(email, delay=30)
+    else:
+        email_input.fill(email)
+    page.wait_for_timeout(400)
+
+    # 4. Контрольная проверка: ни одно видимое поле в окне не должно остаться пустым
+    try:
+        check_inputs = target_frame.locator(
+            'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])'
+        )
+        for i in range(check_inputs.count()):
+            inp = check_inputs.nth(i)
+            if inp.is_visible() and not inp.input_value().strip():
+                inp.click(timeout=2000)
+                inp.press_sequentially("Alex", delay=40)
+    except Exception:
+        pass
+
+    # 5. Отмечаем чекбоксы согласия, если они есть
+    try:
+        checkboxes = target_frame.locator('input[type="checkbox"]')
+        for i in range(checkboxes.count()):
+            cb = checkboxes.nth(i)
+            if cb.is_visible() and not cb.is_checked():
+                cb.check(force=True)
+    except Exception:
+        pass
+
+
+def click_submit_button(target_frame, email_input):
+    submit_selectors = [
+        'button:has-text("ПОЛУЧИТЬ VPN ДОСТУП")',
+        'button:has-text("Получить VPN доступ")',
+        'input[value*="ПОЛУЧИТЬ" i]',
+        'form button[type="submit"]',
+        'form input[type="submit"]',
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'form button',
+        'button:has-text("Получить")',
+        'button:has-text("Отправить")',
+        'button:has-text("Активировать")',
+        'button:has-text("Подключить")',
+    ]
+    for sel in submit_selectors:
+        try:
+            loc = target_frame.locator(sel)
+            for i in range(loc.count()):
+                btn = loc.nth(i)
+                if btn.is_visible():
+                    btn.click(timeout=3000)
+                    return True
+        except Exception:
+            pass
+    try:
+        email_input.press("Enter")
+    except Exception:
+        pass
+    return False
+
+
+def extract_and_validate_sub_page(page):
+    """Извлекает ссылки и проверяет страницу подписки (корректно учитывает редирект на power-vp.pro)"""
+    page_url = page.url
+    is_not_trial_page = "/free-trial" not in page_url.lower()
+    happ_deeplink = None
+    has_add_button = False
+
     btn_selectors = (
         'a:has-text("Добавить подписку"), button:has-text("Добавить подписку"), '
         'a:has-text("Add Subscription"), button:has-text("Add Subscription")'
     )
+
+    # Переключаем вкладку Happ только если мы уже на странице подписки
+    if is_not_trial_page or page.locator(btn_selectors).count() > 0:
+        try:
+            happ_tab = page.get_by_text("Happ", exact=True).first
+            if happ_tab.count() > 0 and happ_tab.is_visible():
+                happ_tab.click(timeout=3000)
+                page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
     try:
         add_btn = page.locator(btn_selectors).first
         if add_btn.count() > 0 and add_btn.is_visible():
@@ -449,30 +583,23 @@ def extract_and_validate_sub_page(page):
         if found_happ:
             happ_deeplink = html.unescape(found_happ[0])
 
-    # Проверяем признаки реальной страницы подписки (RU + EN маркеры со скриншота)
     sub_markers = [
         "Добавить подписку",
         "Add Subscription",
         "SUB_",
-        "Персональный",
         "BANDWIDTH",
-        "Installation",
-        "Установка",
     ]
     has_sub_markers = any(m in content for m in sub_markers)
-    is_not_trial_page = page_url.rstrip("/") != TRIAL_URL.rstrip("/")
 
     is_valid = bool(
         happ_deeplink
         or has_add_button
-        or (is_not_trial_page and ("/sub" in page_url or has_sub_markers))
+        or (is_not_trial_page and ("/sub" in page_url.lower() or has_sub_markers))
     )
 
     if not is_valid:
         return None, None
 
-    # Если страница подписки валидна, но кнопка работает через JS без прямого happ:// в HTML —
-    # формируем прямую ссылку для Happ из адреса самой страницы подписки
     if not happ_deeplink and page_url.startswith("http") and is_not_trial_page:
         happ_deeplink = f"happ://add/{page_url}"
 
@@ -501,76 +628,43 @@ def get_trial_in_incognito(browser, screenshot_path="debug_screen.png"):
         page.goto(TRIAL_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(3000)
 
-        before_links = set(page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)"))
-
         email_input, target_frame = open_email_form(page)
         if not email_input:
             raise RuntimeError("После нажатия кнопок поле ввода почты не появилось")
 
-        # Заполняем только поля имени (не трогая посторонние input на странице)
-        name_inputs = target_frame.locator('input[name*="name" i], input[placeholder*="имя" i], input[placeholder*="name" i]')
-        for i in range(name_inputs.count()):
-            inp = name_inputs.nth(i)
-            if inp.is_visible():
-                try:
-                    inp.fill("Alex")
-                except Exception:
-                    pass
-        page.wait_for_timeout(300)
+        # Запоминаем ссылки ПОСЛЕ открытия модального окна, но ДО отправки формы
+        before_links = set(page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)"))
 
-        email_input.fill(email)
-        page.wait_for_timeout(500)
+        # Заполняем «Ваше имя» и «Ваш E-mail» и отправляем форму
+        fill_form_fields(page, target_frame, email_input, email, use_sequential=False)
+        click_submit_button(target_frame, email_input)
+        page.wait_for_timeout(2500)
 
-        checkboxes = target_frame.locator('input[type="checkbox"]')
-        for i in range(checkboxes.count()):
-            cb = checkboxes.nth(i)
-            if cb.is_visible() and not cb.is_checked():
-                cb.check(force=True)
+        # Если форма показала ошибку «Не заполнены следующие обязательные поля» — вводим посимвольно и жмём ещё раз
+        if page.locator('text="Не заполнены следующие обязательные поля"').count() > 0:
+            print("[!] Обнаружена плашка незаполненного поля — повторяем посимвольный ввод имени и почты...")
+            fill_form_fields(page, target_frame, email_input, email, use_sequential=True)
+            click_submit_button(target_frame, email_input)
+            page.wait_for_timeout(2500)
 
-        clicked_submit = False
-        submit_selectors = [
-            'button:has-text("ПОЛУЧИТЬ VPN ДОСТУП")',
-            'button:has-text("Получить VPN доступ")',
-            'input[value*="ПОЛУЧИТЬ" i]',
-            'form button[type="submit"]',
-            'form input[type="submit"]',
-            'button[type="submit"]',
-            'input[type="submit"]',
-            'form button',
-            'button:has-text("Получить")',
-            'button:has-text("Отправить")',
-            'button:has-text("Активировать")',
-            'button:has-text("Подключить")',
-        ]
-        for sel in submit_selectors:
-            loc = target_frame.locator(sel)
-            for i in range(loc.count()):
-                btn = loc.nth(i)
-                if btn.is_visible():
-                    btn.click()
-                    clicked_submit = True
-                    break
-            if clicked_submit:
-                break
-
-        if not clicked_submit:
-            email_input.press("Enter")
-
-        # КАСКАД 1: Ждём до 25 секунд появления страницы подписки (проверяем каждые 2 сек)
-        for _ in range(13):
-            page.wait_for_timeout(2000)
+        # КАСКАД 1 + 2: До 16 секунд ждём либо редиректа на страницу подписки, либо появления новой ссылки на экране
+        for _ in range(8):
             sub_page_url, happ_link = extract_and_validate_sub_page(page)
             if sub_page_url or happ_link:
-                print(f"[+] Страница подписки открылась сразу после редиректа: {sub_page_url}")
+                print(f"[+] Страница подписки открылась: {sub_page_url}")
                 break
 
-        # КАСКАД 2: Если редиректа не произошло, проверяем новые ссылки, появившиеся на странице
-        if not (sub_page_url or happ_link):
             after_links = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
             new_links = [
                 l for l in after_links
-                if l not in before_links and not is_junk_link(l) and not l.endswith("#")
+                if l not in before_links and not is_junk_link(l)
             ]
+            if new_links:
+                break
+            page.wait_for_timeout(2000)
+
+        # Если на странице появилась новая ссылка — переходим по ней
+        if not (sub_page_url or happ_link) and new_links:
             for target in new_links:
                 print(f"[+] Проверяем новую ссылку со страницы: {target}")
                 if target.startswith("happ://"):
@@ -578,14 +672,14 @@ def get_trial_in_incognito(browser, screenshot_path="debug_screen.png"):
                     break
                 try:
                     page.goto(target, wait_until="domcontentloaded", timeout=25000)
-                    page.wait_for_timeout(5000)
+                    page.wait_for_timeout(4000)
                     sub_page_url, happ_link = extract_and_validate_sub_page(page)
                     if sub_page_url or happ_link:
                         break
                 except Exception as nav_err:
                     print(f"[-] Не удалось открыть ссылку со страницы ({target}): {nav_err}")
 
-        # КАСКАД 3: Если ни страница, ни новые ссылки не дали результат — ВСЕГДА проверяем почту
+        # КАСКАД 3: Если на экране ссылки нет — проверяем входящие письма на почте
         if not (sub_page_url or happ_link):
             print("[*] Проверяем письмо на почте...")
             email_links = wait_for_email_link(api_base, token, timeout=60)
@@ -596,13 +690,12 @@ def get_trial_in_incognito(browser, screenshot_path="debug_screen.png"):
                     break
                 try:
                     page.goto(link, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(6000)
+                    page.wait_for_timeout(5000)
                     sub_page_url, happ_link = extract_and_validate_sub_page(page)
                     if sub_page_url or happ_link:
                         break
                 except Exception as nav_err:
                     print(f"[-] Ссылка из письма ({link}) не загрузилась в браузере: {nav_err}")
-                    # Если сама ссылка из письма ведёт на панель подписки, но браузер поймал таймаут — сохраняем её напрямую
                     if "/sub" in link or "sub." in link:
                         sub_page_url = link
                         happ_link = f"happ://add/{link}"
